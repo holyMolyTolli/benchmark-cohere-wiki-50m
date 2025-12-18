@@ -1,8 +1,7 @@
 import json
-import tqdm
 
-from prepare_data import client
-from prepare_data import read_data, DATASETS, QDRANT_COLLECTION_NAME, LIMIT, EXACT_QUERY_COUNT
+import tqdm
+from prepare_data import DATASETS, EXACT_QUERY_COUNT, LIMIT, QDRANT_COLLECTION_NAME, client, read_data
 from qdrant_client import models
 
 
@@ -21,7 +20,6 @@ def run_exact_search(output_file: str = "search_result_embeddings.jsonl"):
         vector = point.vector
         batch.append(vector)
 
-
     responses = client.query_batch_points(
         collection_name=QDRANT_COLLECTION_NAME,
         requests=[
@@ -32,19 +30,14 @@ def run_exact_search(output_file: str = "search_result_embeddings.jsonl"):
             )
             for vector in batch
         ],
-        timeout=3600
+        timeout=3600,
     )
 
     with open(output_file, "w", encoding="utf-8") as output_f:
         for vector, response in zip(batch, responses):
             hits = response.points
 
-            record = {
-                "query": vector,
-                "closest_ids": [hit.id for hit in hits],
-                "closest_scores": [hit.score for hit in hits],
-                "conditions": None
-            }
+            record = {"query": vector, "closest_ids": [hit.id for hit in hits], "closest_scores": [hit.score for hit in hits], "conditions": None}
 
             output_f.write(json.dumps(record) + "\n")
 
