@@ -104,7 +104,7 @@ def load_all():
 
 
 def main():
-    create_collection(force_recreate=True)
+    create_collection(force_recreate=False)
     load_all()
 
 
