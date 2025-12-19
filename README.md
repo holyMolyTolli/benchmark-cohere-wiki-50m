@@ -1,157 +1,59 @@
-# Benchmarking Qdrant on Cohere Dataset
+# Benchmarking Qdrant on Cohere Multilingual Dataset
 
-Cohere datasets used:
+This project benchmarks Qdrant using the Cohere multilingual dataset to reach a target of 50M vectors.
 
-* [wikipedia-22-12-en-embeddings](https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings) - 35.2M rows
-* [wikipedia-22-12-simple-embeddings](https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings) - 486k rows
-* [wikipedia-22-12-de-embeddings](https://huggingface.co/datasets/Cohere/wikipedia-22-12-de-embeddings) - 15M rows
+**Dataset used:**
+* [Cohere/wikipedia-2023-11-embed-multilingual-v3](https://huggingface.co/datasets/Cohere/wikipedia-2023-11-embed-multilingual-v3)
+* **Total:** 50M embeddings
+* **Dimensions:** 768
+* **Distance:** Cosine
 
-
-Total of 50M embeddings of 768 dimensions.
-Target accuracy: 0.99
-
+## Key Features
+* **Fast-Jump Stream:** `hf.py` uses remote metadata scanning (via `fsspec`) to jump to specific offsets in the Hugging Face dataset without downloading skipped files.
+* **Automatic Resume:** `prepare_data.py` checks the current count in your Qdrant collection and automatically resumes uploading from the next available vector.
 
 ## Scripts
+* `upload/prepare_data.py`: Main entry point. Handles collection creation and resumable upload.
+* `upload/hf.py`: Optimized data loader with remote footer scanning for fast skipping.
+* `upload/exact_search.py`: Generates ground truth by running brute-force search on the first 1000 vectors.
 
-* `upload/prepare_data.py` - downloads data from Hugging Face, file per file, and uploads it to Qdrant.
-* `upload/hf.py` - helper functions to work with Hugging Face datasets.
-* `upload/exact_search.py` - use full-scan queries to generate ground truth for the benchmark (should be used with enough RAM and **full-precision** embeddings).
+## Uploading Data
 
-## Hardware
+1. **Start Qdrant:**
+```bash
+docker run -d --name qdrant --network=host \
+  -v $(pwd)/qdrant-storage:/qdrant/storage \
+  qdrant/qdrant:v1.14.0
+```
 
- - AWS `r6id.4xlarge` - 16 vCPUs, 128 GB RAM, Disk: 950 GB Local NVMe SSD. 
+2. **Configure Environment:**
+Create a `.env` file in the root directory:
+```env
+QDRANT_CLUSTER_URL=http://localhost:6333
+QDRANT_API_KEY=your_key_here
+```
 
+3. **Run Upload:**
+```bash
+python3 upload/prepare_data.py
+```
+*The script will scan for existing points and resume automatically. Progress is displayed via a tqdm bar.*
 
-## Collection configuration
+## Collection Configuration
+The script initializes the collection with `indexing_threshold: 0` for maximum upload speed. 
 
-Here is a breakdown of the collection configuration:
-
+**Note:** After the upload reaches 50M, you should update the collection settings to trigger the HNSW index build:
 ```python
-client.create_collection(
-    QDRANT_COLLECTION_NAME,
-
-    # In our experiments 768d vectors perform better with scalar quantization.
-    # Binary quantization is possible, but would require more re-scoring and will likely saturate disk faster.
-    #
-    # Expected memory consumption: 50M rows * 768 bytes ~= 38 GB
-    quantization_config=models.ScalarQuantization(
-        scalar=models.ScalarQuantizationConfig(
-            type=models.ScalarType.INT8,
-            always_ram=True,
-            quantile=0.99,
-        )
-    ),
-    # For higher accuracy those parameters are tuned to
-    # provide better recall at cost of some longer optimization time.
-    #
-    # Expected memory consumption: 50M rows * 32 u32 * 2 bytes ~= 12Gb
-    hnsw_config=models.HnswConfigDiff(
-        m=32,
-        ef_construct=256,
-    ),
-    vectors_config=models.VectorParams(
-        size=768,
-        distance=models.Distance.COSINE,
-        # We don't need to force original vectors to RAM
-        on_disk=True,
-        # Float16 is well enough precision for storing original vectors
-        # There will be virtually no difference in accuracy with Float32
-        datatype=models.Datatype.FLOAT16,
-    ),
-
-    # We want higher RPS, so we prefer larger segments.
-    # This configuration will create default amount of segments (8),
-    # each with up to 50 millions Kb of vectors.
-    #
-    # Bigger segments will require more indexing time.
-    optimizers_config=models.OptimizersConfigDiff(
-        max_segment_size=50_000_000
-    )
+client.update_collection(
+    collection_name="benchmark",
+    optimizer_config=models.OptimizersConfigDiff(indexing_threshold=20000),
+    hnsw_config=models.HnswConfigDiff(m=32, ef_construct=128)
 )
 ```
 
-
-## Generate reference data
-
-In order to obtain ground truth for the benchmark, we need to run exact search on the dataset.
-This might take a while or require a large machine with enough RAM. So we pre-generate reference data
-and share it as part of the testing repository.
-
-
-If you want to generate your own, you can do so with the following command:
-
+## Running the Benchmark
+Once indexing is complete, follow the instructions in the `vector-db-benchmark` repository to measure RPS and Recall.
 ```bash
-python upload/exact_search.py
-```
-
-
-## Uploading data
-
-
-Run Qdrant on server:
-
-```bash
-# Make sure local directory is mounted to local SSD
-docker run --rm -it --network=host -v $(pwd)/qdrant-storage:/qdrant/storage qdrant/qdrant:v1.14.0
-```
-
-```bash
-export QDRANT_CLUSTER_URL=http://localhost:6333
-export QDRANT_API_KEY=
-
-# Run upload script
-python upload/prepare_data.py
-```
-
-Upload will take about 2.5 hours, including downloading data from Hugging Face,
-converting it to Qdrant format and uploading to Qdrant.
-
-Total upload and indexing time is expected to be around 5 hours.
-
-
-## Running search
-
-At this point, we would like to reuse existing infrastructure for running search - [vector-db-benchmark](https://github.com/qdrant/vector-db-benchmark).
-
-Scripts from this project can work with a compatible format as `upload/exact_search.py` produces, and it already contains all necessary parameters.
-
-### Setup
-
-```bash
-git clone https://github.com/qdrant/vector-db-benchmark.git
-cd vector-db-benchmark
-
-# Install dependencies
-python -m venv .venv
-source .venv/bin/activate
-pip install poetry && poetry install
-```
-
-### Clearing the cache
-
-To avoid system disk cache contamination with benchmark-specific data, we clear disk cache for the whole system, and only after that launch Qdrant.
-
-```bash
-sudo bash -c 'sync; echo 1 > /proc/sys/vm/drop_caches'
-
-docker run --rm -it --network=host -v $(pwd)/qdrant-storage:/qdrant/storage qdrant/qdrant:v1.14.0
-```
-
-### Warming up Qdrant
-
-To simulate a production environment, we will pre-run random queries through the collection:
-
-```bash
-docker run --rm -it --network=host qdrant/bfb:dev ./bfb -n 300000 -d 768 --skip-create --skip-upload --skip-wait-index --quantization-rescore=true --search --search-hnsw-ef=256 --search-limit 100 -p 100 -t 10
-```
-
-Random queries guarantee that there is no correlation with real benchmark queries.
-
-
-### Running the benchmark
-
-
-```
 python3 -m run --engines qdrant-rescore-only --datasets cohere-wiki-50m-test-only --skip-upload
 ```
 
