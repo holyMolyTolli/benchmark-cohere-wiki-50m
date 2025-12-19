@@ -35,10 +35,10 @@ def create_collection(force_recreate=False):
         #     )
         # ),
         # --> leave hnsw_config at default values
-        hnsw_config=models.HnswConfigDiff(
-            m=0,
-            # ef_construct=256,
-        ),
+        # hnsw_config=models.HnswConfigDiff(
+        #     m=0,
+        #     ef_construct=256,
+        # ),
         vectors_config=models.VectorParams(
             size=VECTOR_SIZE,
             distance=models.Distance.COSINE,
@@ -73,7 +73,7 @@ def read_data(datasets: list[str], skip_first: int = 0, limit: int = LIMIT_POINT
 
             embedding = item.pop("emb")
 
-            yield models.PointStruct(id=global_idx, vector=embedding.tolist()[:VECTOR_SIZE])
+            yield models.PointStruct(id=global_idx, vector=embedding.tolist()[:VECTOR_SIZE], payload=item)
 
 
 def load_all():
@@ -118,7 +118,7 @@ def load_all():
 
 
 def main():
-    create_collection(force_recreate=False)
+    create_collection(force_recreate=True)
     load_all()
 
 
