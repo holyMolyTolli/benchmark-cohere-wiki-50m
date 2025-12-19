@@ -80,12 +80,29 @@ def read_data(datasets: list[str], skip_first: int = 0, limit: int = LIMIT_POINT
 
 
 def load_all():
+    # 1. Check how many points are already in the DB
+    collection_info = client.get_collection(QDRANT_COLLECTION_NAME)
+    current_count = collection_info.points_count
+    print(f"Current points in collection: {current_count:,}")
 
-    # Use first 1000 points for testing
-    skip_first = EXACT_QUERY_COUNT
+    # 2. Calculate the new skip value
+    # We always skip the first 1000 (EXACT_QUERY_COUNT) 
+    # plus whatever we have already uploaded.
+    skip_first = EXACT_QUERY_COUNT + current_count
+    
+    # 3. Calculate remaining points to reach the limit
+    remaining_to_upload = LIMIT_POINTS - current_count
+    
+    if remaining_to_upload <= 0:
+        print("Target limit reached. Nothing to upload.")
+        return
 
-    points = read_data(DATASETS, skip_first=skip_first, limit=LIMIT_POINTS + skip_first)
+    print(f"Resuming from index {skip_first:,}. Remaining: {remaining_to_upload:,}")
 
+    # 4. Get the data stream starting after the last uploaded point
+    points = read_data(DATASETS, skip_first=skip_first, limit=LIMIT_POINTS + EXACT_QUERY_COUNT)
+
+    # 5. Upload the points
     client.upload_points(
         collection_name=QDRANT_COLLECTION_NAME,
         points=tqdm.tqdm(
