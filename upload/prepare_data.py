@@ -118,8 +118,16 @@ def load_all():
 
 
 def main():
-    create_collection(force_recreate=True)
+    create_collection(force_recreate=False)
     load_all()
+    # get collection info
+    collection_info = client.get_collection(QDRANT_COLLECTION_NAME)
+    print(collection_info.dict())
+    # set indexing_threshold to 20000
+    client.update_collection(
+        collection_name=QDRANT_COLLECTION_NAME,
+        optimizer_config=models.OptimizersConfigDiff(indexing_threshold=20000),
+    )
 
 
 if __name__ == "__main__":

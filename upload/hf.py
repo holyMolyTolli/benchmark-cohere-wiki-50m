@@ -26,8 +26,9 @@ def list_files(dataset_name: str) -> list[str]:
         print(f"Fetching file list...")
         all_files = api.list_repo_files(dataset_name, repo_type="dataset")
         parquet_files = [f for f in all_files if f.endswith(".parquet")]
-        en_de_files = [f for f in parquet_files if any(f.startswith(f"/{lang}/") for lang in ["en", "de"])]
-        return sorted(en_de_files) if en_de_files else sorted(parquet_files)
+        sorted_en_files = sorted([f for f in parquet_files if f.startswith("en/")])
+        sorted_de_files = sorted([f for f in parquet_files if f.startswith("de/")])
+        return sorted_en_files + sorted_de_files
     except Exception as e:
         print(f"Error listing files: {e}")
         return []
@@ -124,8 +125,7 @@ def read_dataset_stream(dataset_name: str, split: str = "train", skip_to: int = 
     """
     Read the dataset as a stream with fast-jump optimization.
     """
-    files = list_files(dataset_name)
-    parquet_files = [f for f in files if f.endswith(".parquet")]
+    parquet_files = list_files(dataset_name)
 
     # --- FAST JUMP LOGIC ---
     start_file_idx, global_idx_at_start = 0, 0
