@@ -1,43 +1,38 @@
 #!/bin/bash
 
-# Configuration - Ensure these are exported in your terminal
-# export QDRANT_API_KEY='...'
-# export QDRANT_CLUSTER_URL='your-id.cloud.qdrant.io'
+# --- ENSURE VARIABLES ARE PRESENT ---
+if [[ -z "$QDRANT_API_KEY" || -z "$QDRANT_CLUSTER_URL" ]]; then
+    echo "ERROR: Environment variables not found!"
+    exit 1
+fi
 
+CLEAN_URL=$(echo $QDRANT_CLUSTER_URL | sed -e 's|^[^/]*//||' -e 's|/||g')
 OUTPUT_FILE="benchmark_results_$(date +%Y%m%d_%H%M%S).csv"
-
-# Write CSV Header
 echo "Parallel,Threads,HNSW_EF,Avg_RPS,Server_Latency_Avg,Search_Latency_Avg" > "$OUTPUT_FILE"
 
-# Define the Grid
-PARALLELS=(32 64) # 128 256 384 512 640)
-THREADS_LIST=(1) # 2 4 8)
-EF_LIST=(32) # 64 128 256)
-
-echo "Starting Grid Search Strategy: Project Dermador"
-echo "Results will be saved to: $OUTPUT_FILE"
-echo "------------------------------------------------"
+PARALLELS=(32 64 128 256)
+THREADS_LIST=(1 2 4)
+EF_LIST=(32 64 128)
 
 for P in "${PARALLELS[@]}"; do
     for T in "${THREADS_LIST[@]}"; do
         for EF in "${EF_LIST[@]}"; do
             
-            # DYNAMIC NUM_VECTORS: Ensures the test runs for a meaningful duration.
-            # We want each 'parallel user' to perform at least 100 queries.
-            NUM_VECTORS=$((P * 100))
+            NUM_VECTORS=$((P * 150))
             if [ $NUM_VECTORS -lt 5000 ]; then NUM_VECTORS=5000; fi
 
-            echo "[RUNNING] Parallel: $P, Threads: $T, EF: $EF (Queries: $NUM_VECTORS)"
+            echo "[RUNNING] Parallel: $P, Threads: $T, EF: $EF"
 
-            # Run BFB and capture output
-            # We use --json to make parsing the results reliable
             RESULT_JSON="tmp_res.json"
+            rm -f "$RESULT_JSON"
             
+            # --- THE FIX IS HERE: -v mapping and the full path for --json ---
             sudo docker run --rm \
-              -e QDRANT_API_KEY=$QDRANT_API_KEY \
+              -v "$(pwd):/out" \
+              -e QDRANT_API_KEY="$QDRANT_API_KEY" \
               qdrant/bfb:latest \
               ./bfb \
-              --uri "${QDRANT_CLUSTER_URL}:6334" \
+              --uri "https://${CLEAN_URL}:6334" \
               --collection-name "benchmark" \
               --dim 768 \
               --skip-create --skip-upload --skip-wait-index \
@@ -48,38 +43,40 @@ for P in "${PARALLELS[@]}"; do
               --search-limit 10 \
               --search-hnsw-ef "$EF" \
               --timing-threshold 30.0 \
-              --json "$RESULT_JSON" > /dev/null 2>&1
+              --json "/out/$RESULT_JSON"
 
-            # Check if JSON was created (Docker run was successful)
+            # Give the OS a split second to sync the file
+            sleep 1
+
             if [ -f "$RESULT_JSON" ]; then
-                # Extract Avg RPS and Latencies using Python (since jq might not be installed)
-                # BFB JSON format: {"server_timings": [...], "rps": [...], "full_timings": [...]}
+                # (Permissions fix: Docker/sudo makes it root-owned)
+                sudo chmod 666 "$RESULT_JSON"
+                
                 STATS=$(python3 -c "
 import json
 try:
     with open('$RESULT_JSON') as f:
         d = json.load(f)
-        avg_rps = sum(d['rps']) / len(d['rps'])
-        avg_server = sum(d['server_timings']) / len(d['server_timings'])
-        avg_full = sum(d['full_timings']) / len(d['full_timings'])
-        print(f'{avg_rps:.2f},{avg_server:.4f},{avg_full:.4f}')
-except:
+        if not d['rps']: print('0,0,0')
+        else:
+            avg_rps = sum(d['rps']) / len(d['rps'])
+            avg_server = sum(d['server_timings']) / len(d['server_timings'])
+            avg_full = sum(d['full_timings']) / len(d['full_timings'])
+            print(f'{avg_rps:.2f},{avg_server:.4f},{avg_full:.4f}')
+except Exception as e:
     print('error,error,error')
 ")
                 echo "$P,$T,$EF,$STATS" >> "$OUTPUT_FILE"
-                echo "[SUCCESS] RPS: $(echo $STATS | cut -d',' -f1)"
+                echo ">> [SUCCESS] Avg RPS: $(echo $STATS | cut -d',' -f1)"
                 rm "$RESULT_JSON"
             else
-                echo "[FAILED] Run timed out or connection failed."
+                echo ">> [FAILED] JSON file not found at $(pwd)/$RESULT_JSON"
                 echo "$P,$T,$EF,FAIL,FAIL,FAIL" >> "$OUTPUT_FILE"
             fi
 
-            # THE SLEEP: Settles the Load Balancer and makes the 'Sidecar' logs distinct
-            echo "Waiting 15 seconds for cool-down..."
-            sleep 15
+            echo "Sleeping 10s for cooldown..."
+            echo "------------------------------------------------"
+            sleep 10
         done
     done
 done
-
-echo "------------------------------------------------"
-echo "Grid Search Complete. Data saved to $OUTPUT_FILE"
