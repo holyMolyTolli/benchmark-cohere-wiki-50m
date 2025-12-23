@@ -8,9 +8,9 @@ RAW_DATA_DIR="${BASE_OUTPUT_DIR}/raw_benchmark_data"
 TEMP_JSON="tmp_res.json"
 
 # Settings Grid
-PARALLELS=(16 32 48 64)
-THREADS_LIST=(4)
-EF_LIST=(16 32 48 64)
+PARALLELS=(16 32 48 64 128)
+THREADS_LIST=(4 16 32)
+EF_LIST=(16 32 48 64 128)
 # --search-with-payload
 # --keywords
 

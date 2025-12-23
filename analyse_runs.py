@@ -241,31 +241,6 @@ stats_df = prometheus_df.merge(client_stats_df, on="timestamp", how="outer")
 stats_df["filename"] = stats_df["timestamp"].apply(find_experiment_for_timestamp)
 stats_df.dropna(subset=["filename"], inplace=True)
 
-# Calculate the time difference in seconds between rows (per experiment)
-stats_df["time_delta"] = stats_df.sort_values(by="timestamp").groupby("filename")["timestamp"].diff().dt.total_seconds()
-stats_df["time_delta"] = stats_df["time_delta"].fillna(0)
-
-
-# Helper function to calculate rate: (Current - Previous) / Time_Delta
-def calc_rate(df, col_name):
-    diff = df.groupby("filename")[col_name].diff()
-    return diff / df["time_delta"]
-
-
-# A. CPU: (Seconds used / Seconds passed) = vCPUs used
-# We assume the metric is aggregated across 4 nodes.
-# If usage is 64.0, it means all 64 vCPUs are at 100%.
-stats_df["server_cpu_usage_vcpus"] = calc_rate(stats_df, "container_cpu_usage_seconds_total")
-
-# B. Disk I/O: Convert Bytes -> Megabytes per Second
-stats_df["disk_read_mb_s"] = calc_rate(stats_df, "container_fs_reads_bytes_total") / (1024**2)
-stats_df["disk_write_mb_s"] = calc_rate(stats_df, "container_fs_writes_bytes_total") / (1024**2)
-
-# C. Page Faults: Faults per Second
-stats_df["page_faults_per_sec"] = calc_rate(stats_df, "process_major_page_faults_total")
-
-# D. Client Network: Bytes -> Megabytes per Second
-stats_df["client_net_out_mb_s"] = calc_rate(stats_df, "client_net_out_bytes") / (1024**2)
 
 # --- UNIT CONVERSION: Gauges ---
 
@@ -278,22 +253,15 @@ stats_df["server_ram_usage_%"] = (stats_df["server_ram_gb"] / 256.0) * 100
 # --- AGGREGATION ---
 
 # Define the final columns we want to analyze (using the new converted names)
-cols_to_aggregate = ["client_cpu_%", "client_memory_mb", "client_net_out_mb_s", "server_ram_gb", "server_ram_usage_%", "server_cpu_usage_vcpus", "page_faults_per_sec", "disk_read_mb_s", "disk_write_mb_s"]  # Calculated Rate  # Converted Unit  # Calculated %  # Calculated Rate  # Calculated Rate  # Calculated Rate  # Calculated Rate
-benchmark_cols = ["rps_median", "server_p95", "server_p99"]
+cols_to_aggregate = ["client_cpu_%", "client_memory_mb", "server_ram_gb", "server_ram_usage_%"]  # Calculated Rate  # Converted Unit  # Calculated %  # Calculated %  # Calculated Rate
 
-# Group by configuration and calculate stats
-# We use 'filename' as an intermediate grouper if you want stats per run,
-# or directly by P/T/EF for stats across all runs of that type.
-
-stats_df_merged = stats_df.merge(benchmark_df, on="filename", how="outer")
-
-final_stats = stats_df_merged.groupby(["P", "T", "EF"] + benchmark_cols)[cols_to_aggregate].agg(["median", "mean", "min", "max"]).reset_index()
-
-# Flatten the hierarchical columns (e.g., client_cpu_% -> mean) into readable names
+final_stats = stats_df.groupby(["filename"])[cols_to_aggregate].agg(["median", "mean", "min", "max"]).reset_index()
 final_stats.columns = ["_".join(col).strip("_") for col in final_stats.columns.values]
 
+stats_df_merged = final_stats.merge(benchmark_df, on="filename", how="outer")
 
 # Save
-columns_of_interest = ["P", "T", "EF", "rps_median", "server_p95", "server_p99"] + [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
+columns_of_interest = ["filename", "P", "T", "EF", "rps_median", "server_p95", "server_p99"] + [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
 
-final_stats[columns_of_interest].to_csv(os.path.join(BASE_OUTPUT_DIR, "benchmark_summary_hardware.csv"), index=False)
+stats_df_merged[columns_of_interest].to_csv(os.path.join(BASE_OUTPUT_DIR, "benchmark_summary_hardware.csv"), index=False)
+
