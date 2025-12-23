@@ -222,58 +222,78 @@ benchmark_df = benchmark_df.sort_values(by=["P", "EF", "T"])
 
 # get prometheus data
 sys_files = sorted(glob.glob(os.path.join(BASE_OUTPUT_DIR, "raw_sys_metrics", "*.txt")))
-
 prometheus_datas = []
 for sys_file in sys_files:
     prometheus_data = parse_prometheus_data(sys_file)
     ts = "_".join(os.path.basename(sys_file).split("_")[-2:]).replace(".txt", "")
     prometheus_data["timestamp"] = datetime.strptime(ts, "%Y%m%d_%H%M%S")
     prometheus_datas.append(prometheus_data)
-
 prometheus_df = pd.DataFrame(prometheus_datas)
 prometheus_df = prometheus_df.sort_values(by="timestamp")
-
 
 # get client stats data
 client_stats_df = pd.read_csv(os.path.join(BASE_OUTPUT_DIR, "client_stats.csv"))
 client_stats_df["timestamp"] = pd.to_datetime(client_stats_df["timestamp"])
 
 
-# combine all data
+# combine time series data
 stats_df = prometheus_df.merge(client_stats_df, on="timestamp", how="outer")
-
 stats_df["filename"] = stats_df["timestamp"].apply(find_experiment_for_timestamp)
+stats_df.dropna(subset=["filename"], inplace=True)
+
+# Calculate the time difference in seconds between rows (per experiment)
+stats_df["time_delta"] = stats_df.sort_values(by="timestamp").groupby("filename")["timestamp"].diff().dt.total_seconds()
+stats_df["time_delta"] = stats_df["time_delta"].fillna(0)
+
+
+# Helper function to calculate rate: (Current - Previous) / Time_Delta
+def calc_rate(df, col_name):
+    diff = df.groupby("filename")[col_name].diff()
+    return diff / df["time_delta"]
+
+
+# A. CPU: (Seconds used / Seconds passed) = vCPUs used
+# We assume the metric is aggregated across 4 nodes.
+# If usage is 64.0, it means all 64 vCPUs are at 100%.
+stats_df["server_cpu_usage_vcpus"] = calc_rate(stats_df, "container_cpu_usage_seconds_total")
+
+# B. Disk I/O: Convert Bytes -> Megabytes per Second
+stats_df["disk_read_mb_s"] = calc_rate(stats_df, "container_fs_reads_bytes_total") / (1024**2)
+stats_df["disk_write_mb_s"] = calc_rate(stats_df, "container_fs_writes_bytes_total") / (1024**2)
+
+# C. Page Faults: Faults per Second
+stats_df["page_faults_per_sec"] = calc_rate(stats_df, "process_major_page_faults_total")
+
+# D. Client Network: Bytes -> Megabytes per Second
+stats_df["client_net_out_mb_s"] = calc_rate(stats_df, "client_net_out_bytes") / (1024**2)
+
+# --- UNIT CONVERSION: Gauges ---
+
+# Convert Server RAM from Bytes to GB
+stats_df["server_ram_gb"] = stats_df["container_memory_working_set_bytes"] / (1024**3)
+
+# Calculate RAM usage % (Total available is 256GB)
+stats_df["server_ram_usage_%"] = (stats_df["server_ram_gb"] / 256.0) * 100
+
+# --- AGGREGATION ---
+
+# Define the final columns we want to analyze (using the new converted names)
+cols_to_aggregate = ["client_cpu_%", "client_memory_mb", "client_net_out_mb_s", "server_ram_gb", "server_ram_usage_%", "server_cpu_usage_vcpus", "page_faults_per_sec", "disk_read_mb_s", "disk_write_mb_s"]  # Calculated Rate  # Converted Unit  # Calculated %  # Calculated Rate  # Calculated Rate  # Calculated Rate  # Calculated Rate
+benchmark_cols = ["rps_median", "server_p95", "server_p99"]
+
+# Group by configuration and calculate stats
+# We use 'filename' as an intermediate grouper if you want stats per run,
+# or directly by P/T/EF for stats across all runs of that type.
 
 stats_df_merged = stats_df.merge(benchmark_df, on="filename", how="outer")
 
+final_stats = stats_df_merged.groupby(["P", "T", "EF"] + benchmark_cols)[cols_to_aggregate].agg(["median", "mean", "min", "max"]).reset_index()
 
-columns_of_interest = [
-    # --- 1. Config (Context) ---
-    "P",  # Connection Pool
-    "T",  # Threads
-    "EF",  # HNSW Search parameter
-    # --- 2. RPS & Latency (The Result) ---
-    "rps_median",  # Throughput
-    "server_p95",  # Qdrant tail latency
-    "server_p99",  # Qdrant tail latency
-    "search_p95",  # Client Latency (95th percentile)
-    "search_p99",  # Client Latency (99th percentile)
-    # --- 3. Client Side (The Sender) ---
-    "client_cpu_%",  # Is the generator maxed out?
-    "client_memory_mb",  # Is the client OOM?
-    "client_net_out_bytes",  # Bandwidth check
-    # --- 4. Server Bottlenecks (The Diagnosis) ---
-    # RAM & CPU
-    "container_memory_working_set_bytes",  # Actual Server RAM Usage
-    "container_cpu_usage_seconds_total",  # Total Server CPU time used
-    # Disk I/O & Page Faults (for latency)
-    "process_major_page_faults_total",  # Indicates fetching from Disk -> RAM
-    "container_fs_reads_bytes_total",  # Volume of data read from disk
-    "container_fs_writes_bytes_total",  # Background indexing activity
-    # # Ingress / Load Balancer
-    # "traefik_service_request_duration_seconds_sum",  # Is the ingress adding lag?
-    # "traefik_service_request_duration_seconds_count",  # Total requests hitting ingress
-]
+# Flatten the hierarchical columns (e.g., client_cpu_% -> mean) into readable names
+final_stats.columns = ["_".join(col).strip("_") for col in final_stats.columns.values]
 
 
-stats_df_merged[columns_of_interest].to_csv(os.path.join(BASE_OUTPUT_DIR, "stats_df_merged.csv"), index=False)
+# Save
+columns_of_interest = ["P", "T", "EF", "rps_median", "server_p95", "server_p99"] + [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
+
+final_stats[columns_of_interest].to_csv(os.path.join(BASE_OUTPUT_DIR, "benchmark_summary_hardware.csv"), index=False)
