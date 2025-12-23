@@ -1,56 +1,69 @@
 #!/bin/bash
-# sidecar_v3_ultimate.sh
+# sidecar_v4_raw_collector.sh
 
-# 1. Organize workspace
-START_TIME=$(date +%Y%m%d_%H%M%S)
-TELEMETRY_FOLDER="run_$START_TIME"
-mkdir -p "$TELEMETRY_FOLDER"
-LOG_FILE="$TELEMETRY_FOLDER/dermador_master_log.csv"
+# --- 1. SETUP WORKSPACE ---
+RUN_FOLDER="${BASE_OUTPUT_DIR}"
 
-# 2. Header
-echo "Timestamp,Client_CPU,Client_Net_In,Client_Net_Out,Server_CPU_Usage,Server_Throttled,Server_RSSAnon_GB,Segments_Count,Active_Optimizations,Disk_Read_MBs,Traefik_Latency" > "$LOG_FILE"
+# Create specific subfolders to keep the directory clean
+mkdir -p "$RUN_FOLDER/raw_metrics"      # For Qdrant internal metrics
+mkdir -p "$RUN_FOLDER/raw_sys_metrics"  # For Container/System metrics
+mkdir -p "$RUN_FOLDER/telemetry"        # For full cluster telemetry
 
-echo "ULTIMATE MONITORING ENABLED. Output folder: $TELEMETRY_FOLDER"
+# We will still keep a simple CSV for the CLIENT stats (Load Generator), 
+# because that is local and easy to parse now.
+CLIENT_LOG="$RUN_FOLDER/client_stats.csv"
+# ass units to the column names
+echo "timestamp,client_cpu_%,client_net_in_bytes,client_net_out_bytes,client_memory_mb" > "$CLIENT_LOG"
+
+echo "----------------------------------------------------------------"
+echo "RAW DATA COLLECTOR STARTED"
+echo "Output Folder: $RUN_FOLDER"
+echo "----------------------------------------------------------------"
 
 # Detect network interface (handles eth0, ens4, etc.)
 IFACE=$(ip route get 8.8.8.8 | awk '{ print $5; exit }')
 
+# Ensure QDRANT_CLUSTER_URL does not have https:// prefix for this specific formatting
+# (Assuming your previous config worked with port 6333)
+BASE_URL="${QDRANT_CLUSTER_URL}:6333"
+
 ITERATION=0
+
 while true; do
-    TS=$(date +%H:%M:%S)
+    # Current Time for Display and Filenames
+    TS_PRINT=$(date +%Y-%m-%d\ %H:%M:%S)
+    TS_FILE=$(date +%Y%m%d_%H%M%S)
     
-    # 1. CLIENT LAYER (Kirstin Instance)
+    # --- 1. CLIENT LAYER (Local Machine Stats) ---
+    # We parse this now because it's simple and local
     CLIENT_CPU=$(top -bn1 | grep "Cpu(s)" | awk '{print 100 - $8}')
     NET_STAT=$(cat /proc/net/dev | grep "$IFACE")
     NET_IN=$(echo $NET_STAT | awk '{print $2}')
     NET_OUT=$(echo $NET_STAT | awk '{print $10}')
+    CLIENT_MEMORY=$(free -m | grep "Mem:" | awk '{print $3}')
 
-    # 2. SERVER LAYER (Using Port 6333 for REST/Metrics)
-    # Ensure QDRANT_CLUSTER_URL does not have https:// prefix for this specific formatting
-    BASE_URL="${QDRANT_CLUSTER_URL}:6333"
+    # Write local stats to CSV
+    echo "$TS_PRINT,$CLIENT_CPU,$NET_IN,$NET_OUT,$CLIENT_MEMORY" >> "$CLIENT_LOG"
+
+    # --- 2. SERVER LAYER (Save RAW Data) ---
+    # Instead of parsing, we dump the whole response to a text file.
     
-    M_DATA=$(curl -s -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/metrics")
-    S_DATA=$(curl -s -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/sys_metrics")
+    # Save Qdrant Metrics (RPS, Latency counts, Indexing info)
+    curl -s -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/metrics" \
+    > "$RUN_FOLDER/raw_metrics/metrics_${TS_FILE}.txt"
 
-    # Extract Stats
-    SERVER_CPU=$(echo "$S_DATA" | grep "container_cpu_usage_seconds_total" | awk '{print $2}')
-    THROTTLE=$(echo "$S_DATA" | grep "container_cpu_cfs_throttled_periods_total" | awk '{print $2}')
-    RSS_ANON=$(echo "$M_DATA" | grep "qdrant_node_rssanon_bytes" | awk '{print $2 / 1024 / 1024 / 1024}')
-    SEG_COUNT=$(echo "$M_DATA" | grep "collection_segments_count" | tail -n 1 | awk '{print $2}')
-    OPTIMIZING=$(echo "$M_DATA" | grep "collection_running_optimizations" | tail -n 1 | awk '{print $2}')
-    DISK_READ=$(echo "$M_DATA" | grep "storage_io_read_bytes_total" | awk '{print $2 / 1024 / 1024}')
-    TRAEFIK=$(echo "$S_DATA" | grep "traefik_service_request_duration_seconds_sum" | awk '{print $2}')
+    # Save System Metrics (CPU, RAM, Disk I/O, Throttling)
+    curl -s -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/sys_metrics" \
+    > "$RUN_FOLDER/raw_sys_metrics/sys_metrics_${TS_FILE}.txt"
 
-    # 3. LOG TO CSV
-    echo "$TS,$CLIENT_CPU,$NET_IN,$NET_OUT,$SERVER_CPU,$THROTTLE,$RSS_ANON,$SEG_COUNT,$OPTIMIZING,$DISK_READ,$TRAEFIK" >> "$LOG_FILE"
-    
-    # 4. TELEMETRY SNAPSHOT (Every 5 iterations = ~10 seconds)
+    # --- 3. TELEMETRY SNAPSHOT (Every 5 loops / ~10 seconds) ---
     if (( ITERATION % 5 == 0 )); then
-        FILE_TS=$(date +%H%M%S)
-        curl -s -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/telemetry?details_level=10" > "$TELEMETRY_FOLDER/telemetry_snap_${FILE_TS}.json"
-        echo "[$TS] Snapshot saved | Client CPU: $CLIENT_CPU%"
+        curl -s -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/telemetry?details_level=10" \
+        > "$RUN_FOLDER/telemetry/telemetry_${TS_FILE}.json"
+        
+        echo "[$TS_PRINT] Snapshot Saved | Client CPU: $CLIENT_CPU%"
     fi
 
     ((ITERATION++))
-    sleep 2
+    sleep 5
 done
