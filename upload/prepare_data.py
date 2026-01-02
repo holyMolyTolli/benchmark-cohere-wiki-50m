@@ -9,7 +9,7 @@ QDRANT_CLUSTER_URL = os.getenv("QDRANT_CLUSTER_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_COLLECTION_NAME = "benchmark"
 EXACT_QUERY_COUNT = 1000
-LIMIT_POINTS = 50_000_000
+LIMIT_POINTS = 55_000_000
 DATASETS = ["Cohere/wikipedia-2023-11-embed-multilingual-v3"]
 
 VECTOR_SIZE = 768
@@ -112,7 +112,7 @@ def load_all():
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
             desc="Uploading points",
         ),
-        parallel=16,
+        parallel=150,
         batch_size=256,
     )
 

@@ -8,9 +8,9 @@ RAW_DATA_DIR="${BASE_OUTPUT_DIR}/raw_benchmark_data"
 TEMP_JSON="tmp_res.json"
 
 # Settings Grid
-PARALLELS=(16 32 48 64 128)
-THREADS_LIST=(4 16 32)
-EF_LIST=(16 32 48 64 128)
+PARALLELS=(128)
+THREADS_LIST=(4)
+EF_LIST=(16 32 48)
 # --search-with-payload
 # --keywords
 
@@ -43,7 +43,7 @@ for P in "${PARALLELS[@]}"; do
             
             # heuristic: scale vectors based on parallelism, min 1000
             NUM_VECTORS=$((P * 150))
-            if [ "$NUM_VECTORS" -lt 5000 ]; then NUM_VECTORS=5000; fi
+            if [ "$NUM_VECTORS" -lt 1000 ]; then NUM_VECTORS=1000; fi
 
             echo -n "👉 Running [P:$P | T:$T | EF:$EF] ... "
 
