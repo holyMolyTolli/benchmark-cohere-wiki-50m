@@ -144,11 +144,11 @@ def main():
 
     try:
         client = QdrantClient(url=QDRANT_CLUSTER_URL, api_key=QDRANT_API_KEY, prefer_grpc=True, timeout=36000)  # For full-scan search
-        
+
         # get collection info
         collection_info = client.get_collection(QDRANT_COLLECTION_NAME)
         print(collection_info.model_dump())
-        
+
         # only used for initial big upload
         # # set indexing_threshold to 20000
         # client.update_collection(

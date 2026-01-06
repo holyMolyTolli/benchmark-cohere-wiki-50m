@@ -309,5 +309,5 @@ stats_df_merged = final_stats.merge(benchmark_df, on="filename", how="outer")
 # Save
 
 
-columns_of_interest = ["filename", "max_optimization_threads", "max_indexing_threads", "default_segment_number", "max_segment_size", "indexing_threshold","parallel", "threads", "hnsw_ef", "rps_median", "server_p99", "server_p95"] + [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
+columns_of_interest = ["filename", "max_optimization_threads", "max_indexing_threads", "default_segment_number", "max_segment_size", "indexing_threshold", "parallel", "threads", "hnsw_ef", "rps_median", "server_p99", "server_p95"] + [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
 stats_df_merged[columns_of_interest].to_csv(os.path.join(BASE_OUTPUT_DIR, "benchmark_summary_hardware.csv"), index=False)
