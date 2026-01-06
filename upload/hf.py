@@ -28,7 +28,8 @@ def list_files(dataset_name: str) -> list[str]:
         parquet_files = [f for f in all_files if f.endswith(".parquet")]
         sorted_en_files = sorted([f for f in parquet_files if f.startswith("en/")])
         sorted_de_files = sorted([f for f in parquet_files if f.startswith("de/")])
-        return sorted_en_files + sorted_de_files
+        sorted_fr_files = sorted([f for f in parquet_files if f.startswith("fr/")])
+        return sorted_en_files + sorted_de_files + sorted_fr_files
     except Exception as e:
         print(f"Error listing files: {e}")
         return []

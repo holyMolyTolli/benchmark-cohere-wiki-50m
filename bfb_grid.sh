@@ -1,100 +1,353 @@
 #!/bin/bash
-set -e  # Exit immediately if a command exits with a non-zero status
+# set -e
+
+source .env
+source .venv/bin/activate
 
 # --- CONFIGURATION ---
-BASE_OUTPUT_DIR="${BASE_OUTPUT_DIR}"
-BATCH_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RAW_DATA_DIR="${BASE_OUTPUT_DIR}/raw_benchmark_data"
 TEMP_JSON="tmp_res.json"
+COLLECTION_NAME="benchmark"
 
-# Settings Grid
-PARALLELS=(128)
-THREADS_LIST=(4)
-EF_LIST=(16 32 48)
+# --- GRID ---
+MAX_OPTIMIZATION_THREADS_LIST=(\"auto\" 2) # \"auto\" 0 1 2 4
+# If null - have no limit and choose dynamically to saturate CPU.
+# If 0 - no optimization threads, optimizations will be disabled.
+
+MAX_INDEXING_THREADS_LIST=(2 4) # 0 1 2 4 8
+# If 0 - automatically select.
+
+DEFAULT_SEGMENT_NUMBER_LIST=(1 2) #  0 1 2 100 200 300
+# If `default_segment_number = 0`, will be automatically selected by the number of available CPUs
+
+MAX_SEGMENT_SIZE_LIST=(200000) # **null????** 20000 200000 2000000
+# If not set, will be automatically selected considering the number of available CPUs.
+
+INDEXING_THRESHOLD_LIST=(20000 40000) # 0 2000 20000 200000
+# To explicitly disable vector indexing, set to `0`.
+
+
+PARALLEL_LIST=(8)
+THREADS_LIST=(2)
+SEARCH_HNSW_EF_LIST=(32)
 # --search-with-payload
 # --keywords
 
-# --- PRE-FLIGHT CHECKS ---
+# P=8
+# T=2
+# EF=32
+# max_optimization_threads=8
+# max_indexing_threads=88
+# indexing_threshold=888
+# max_segment_size=8888
+# default_segment_number=88888
+
+# --- PRE-FLIGHT ---
 if [[ -z "$QDRANT_API_KEY" || -z "$QDRANT_CLUSTER_URL" ]]; then
-    echo "❌ ERROR: Environment variables QDRANT_API_KEY or QDRANT_CLUSTER_URL not found."
+    echo "ERROR: Missing API Key or URL."
     exit 1
 fi
 
-# Clean URL (remove protocol and trailing slashes using bash parameter expansion)
-CLEAN_URL="${QDRANT_CLUSTER_URL#*://}" # Remove http:// or https://
-CLEAN_URL="${CLEAN_URL%/}"             # Remove trailing slash
-
-# Create Output Directory
+CLEAN_URL="${QDRANT_CLUSTER_URL#*://}"
+CLEAN_URL="${CLEAN_URL%/}"
 mkdir -p "$RAW_DATA_DIR"
 
-# Ensure cleanup of temp file on exit or interrupt
-trap "rm -f $TEMP_JSON" EXIT
+# ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
+
+cleanup() {
+    echo -e "\nScript interrupted. Cleaning up..."
+    rm -f "$TEMP_JSON"
+    pkill -f "prepare_data.py" 2>/dev/null
+    exit
+}
+trap cleanup SIGINT SIGTERM EXIT
+
+wait_for_green() {
+    echo -n "   Waiting for collection Green status..."
+    while true; do
+        STATUS=$(curl -s -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
+            -H "api-key: ${QDRANT_API_KEY}" | jq -r '.result.status')
+        if [ "$STATUS" == "green" ]; then
+            echo " OK."
+            return 0
+        fi
+        sleep 2
+    done
+}
+
+get_point_count() {
+    curl -s -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
+        -H "api-key: ${QDRANT_API_KEY}" | jq -r '.result.points_count'
+}
+
+apply_tuning() {
+    local max_segment_size=$1
+    local default_segment_number=$2
+    local max_optimization_threads=$3
+    local max_indexing_threads=$4
+    local indexing_threshold=$5
+    echo "Applying Tuning: max_optimization_threads=$max_optimization_threads | max_segment_size=$max_segment_size | default_segment_number=$default_segment_number | max_indexing_threads=$max_indexing_threads | indexing_threshold=$indexing_threshold"
+    curl -s -X PATCH "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
+        -H "api-key: ${QDRANT_API_KEY}" \
+        -H "Content-Type: application/json" \
+        --data-raw "{
+        \"optimizers_config\": {
+            \"max_optimization_threads\": $max_optimization_threads,
+            \"max_segment_size\": $max_segment_size,
+            \"default_segment_number\": $default_segment_number,
+            \"indexing_threshold\": $indexing_threshold
+        },
+        \"hnsw_config\": {
+            \"max_indexing_threads\": $max_indexing_threads
+        }
+        }"
+
+    # get collection info and check if the config is applied
+    COLLECTION_INFO=$(curl -s -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
+        -H "api-key: ${QDRANT_API_KEY}")
+    echo "Collection info: $COLLECTION_INFO"
+
+    # check max_optimization_threads
+    MAX_OPTIMIZATION_THREADS=$(echo $COLLECTION_INFO | jq -r '.result.config.optimizer_config.max_optimization_threads')
+    # if max_optimization_threads is auto, convert to null
+    if [ "$max_optimization_threads" == \"auto\" ]; then
+        max_optimization_threads=null
+    fi
+    if [ "$MAX_OPTIMIZATION_THREADS" != "$max_optimization_threads" ]; then
+        echo "ERROR: max_optimization_threads not applied. Expected $max_optimization_threads, got $MAX_OPTIMIZATION_THREADS"
+        exit 1
+    fi
+
+    # check max_segment_size
+    MAX_SEGMENT_SIZE=$(echo $COLLECTION_INFO | jq -r '.result.config.optimizer_config.max_segment_size')
+    if [ "$MAX_SEGMENT_SIZE" != "$max_segment_size" ]; then
+        echo "ERROR: max_segment_size not applied. Expected $max_segment_size, got $MAX_SEGMENT_SIZE"
+        exit 1
+    fi
+
+    # check default_segment_number
+    DEFAULT_SEGMENT_NUMBER=$(echo $COLLECTION_INFO | jq -r '.result.config.optimizer_config.default_segment_number')
+    if [ "$DEFAULT_SEGMENT_NUMBER" != "$default_segment_number" ]; then
+        echo "ERROR: default_segment_number not applied. Expected $default_segment_number, got $DEFAULT_SEGMENT_NUMBER"
+        exit 1
+    fi
+
+    # check indexing_threshold
+    INDEXING_THRESHOLD=$(echo $COLLECTION_INFO | jq -r '.result.config.optimizer_config.indexing_threshold')
+    if [ "$INDEXING_THRESHOLD" != "$indexing_threshold" ]; then
+        echo "ERROR: indexing_threshold not applied. Expected $indexing_threshold, got $INDEXING_THRESHOLD"
+        exit 1
+    fi
+
+    # check max_indexing_threads
+    MAX_INDEXING_THREADS=$(echo $COLLECTION_INFO | jq -r '.result.config.hnsw_config.max_indexing_threads')
+    if [ "$MAX_INDEXING_THREADS" != "$max_indexing_threads" ]; then
+        echo "ERROR: max_indexing_threads not applied. Expected $max_indexing_threads, got $MAX_INDEXING_THREADS"
+        exit 1
+    fi
+}
+
+# ==============================================================================
+# MAIN EXECUTION
+# ==============================================================================
 
 echo "========================================================"
-echo "🚀 STARTING BENCHMARK GRID"
-echo "📂 Output Directory: $RAW_DATA_DIR"
-echo "🎯 Target: $CLEAN_URL"
+echo "STARTING BENCHMARK GRID"
 echo "========================================================"
+
+pkill -f "prepare_data.py"
+
+# Initial Reset
+echo "Resetting DB to 49M baseline..."
+export LIMIT_POINTS=49000000
+python3 upload/prepare_data.py
+sleep 2
+# wait_for_green
 
 # --- MAIN LOOP ---
-for P in "${PARALLELS[@]}"; do
-    for T in "${THREADS_LIST[@]}"; do
-        for EF in "${EF_LIST[@]}"; do
-            
-            # heuristic: scale vectors based on parallelism, min 1000
-            NUM_VECTORS=$((P * 150))
-            if [ "$NUM_VECTORS" -lt 1000 ]; then NUM_VECTORS=1000; fi
+for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
+    for default_segment_number in "${DEFAULT_SEGMENT_NUMBER_LIST[@]}"; do
+        for max_optimization_threads in "${MAX_OPTIMIZATION_THREADS_LIST[@]}"; do
+            for max_indexing_threads in "${MAX_INDEXING_THREADS_LIST[@]}"; do
+                for indexing_threshold in "${INDEXING_THRESHOLD_LIST[@]}"; do
+                    echo "----------------------------------------------------------------"
+                    echo "NEW CONFIGURATION: max_segment_size=$max_segment_size | default_segment_number=$default_segment_number | max_optimization_threads=$max_optimization_threads | max_indexing_threads=$max_indexing_threads | indexing_threshold=$indexing_threshold"
+                    echo "----------------------------------------------------------------"
 
-            echo -n "👉 Running [P:$P | T:$T | EF:$EF] ... "
+                    # ---------------------------------------------------------
+                    # STEP 1: APPLY TUNING (Server Side)
+                    # ---------------------------------------------------------
+                    echo "Applying Tuning Parameters..."
+                    apply_tuning "$max_segment_size" "$default_segment_number" "$max_optimization_threads" "$max_indexing_threads" "$indexing_threshold"
 
-            # Capture Start Time (Format: YYYYMMDD_HHMMSS)
-            START_TIME=$(date +%Y%m%d_%H%M%S)
+                    # ---------------------------------------------------------
+                    # STEP 2: RESET TO BASELINE (Blocking)
+                    # ---------------------------------------------------------
+                    echo "Resetting DB to 50M baseline..."
+                    export LIMIT_POINTS=50000000
 
-            # --- RUN DOCKER ---
-            # Using an array for arguments is cleaner and safer
-            sudo docker run --rm \
-              -v "$(pwd):/out" \
-              -e QDRANT_API_KEY="$QDRANT_API_KEY" \
-              qdrant/bfb:latest \
-              ./bfb \
-              --uri "https://${CLEAN_URL}:6334" \
-              --collection-name "benchmark" \
-              --dim 768 \
-              --skip-create \
-              --skip-upload \
-              --skip-wait-index \
-              --search \
-              --num-vectors "$NUM_VECTORS" \
-              --parallel "$P" \
-              --threads "$T" \
-              --search-limit 10 \
-              --search-hnsw-ef "$EF" \
-              --timing-threshold 30.0 \
-              --json "/out/$TEMP_JSON" > /dev/null 2>&1
+                    # We run this in foreground (no &) because we must wait for it to finish cleaning
+                    # I do this here ech time i reset the configuration because i want to be sure the db is clean and ready for the next experiment and to make experiments comparable. deleting is relatively fast and i have to wait for green status anyway after upodating ther config.
+                    python3 upload/prepare_data.py
+                    sleep 2
 
-            # Capture End Time
-            END_TIME=$(date +%Y%m%d_%H%M%S)
+                    # ---------------------------------------------------------
+                    # STEP 3: WAIT FOR GREEN STATUS
+                    # ---------------------------------------------------------
+                    wait_for_green
 
-            # Process Result
-            if [ -f "$TEMP_JSON" ]; then
-                # Docker often creates files as root, fix permissions
-                sudo chmod 666 "$TEMP_JSON"
-                
-                # Construct Filename with metadata
-                FILENAME="run_P${P}_T${T}_EF${EF}_start${START_TIME}_end${END_TIME}.json"
-                mv "$TEMP_JSON" "${RAW_DATA_DIR}/${FILENAME}"
-                
-                echo "✅ Done. Saved."
-            else
-                echo "❌ FAILED. No output generated."
-            fi
+                    # ---------------------------------------------------------
+                    # STEP 4: START BACKGROUND WRITES
+                    # ---------------------------------------------------------
+                    CURRENT_VECTORS=$(get_point_count)
 
-            # Short cooldown to let the server breathe
-            sleep 2
+                    echo "Starting Concurrent Writes..."
+                    export LIMIT_POINTS=100000000 # 100M vectors is just a large number. I just want to upload concurrently in background and will stop the upload once the experiment is done.
+
+                    # Start in background & save PID
+                    python3 upload/prepare_data.py >/dev/null 2>&1 &
+                    BG_PID=$!
+
+                    # ---------------------------------------------------------
+                    # STEP 3: WAIT FOR 5XM VECTORS
+                    # ---------------------------------------------------------
+                    TARGET_VECTORS=$((CURRENT_VECTORS + 1000000))
+                    echo -n "   Waiting for $TARGET_VECTORS vectors..."
+                    while true; do
+                        VECTORS=$(get_point_count)
+                        # SAFETY CHECK: Did the python script die?
+                        if ! kill -0 $BG_PID 2>/dev/null; then
+                            echo " ERROR: Background uploader died! Stopping this run."
+                            break
+                        fi
+                        if [ "$VECTORS" -ge "$TARGET_VECTORS" ]; then
+                            echo " OK."
+                            break
+                        fi
+                        sleep 1
+                    done
+
+                    # ---------------------------------------------------------
+                    # STEP 5: RUN READ BENCHMARK
+                    # ---------------------------------------------------------
+                    for P in "${PARALLEL_LIST[@]}"; do
+                        for T in "${THREADS_LIST[@]}"; do
+                            for EF in "${SEARCH_HNSW_EF_LIST[@]}"; do
+
+                                # heuristic: scale vectors based on parallelism, min 5000
+                                NUM_VECTORS=$((P * 150))
+                                if [ "$NUM_VECTORS" -lt 5000 ]; then NUM_VECTORS=5000; fi
+
+                                echo -n "Running [P:$P | T:$T | EF:$EF] ... "
+
+                                # Capture Start Time (Format: YYYYMMDD_HHMMSS)
+                                START_TIME=$(date +%Y%m%d_%H%M%S)
+
+                                # --- RUN DOCKER ---
+                                sudo docker run --rm \
+                                    --network host \
+                                    -v "$(pwd):/out" \
+                                    -e QDRANT_API_KEY="$QDRANT_API_KEY" \
+                                    -e RUST_BACKTRACE=1 \
+                                    qdrant/bfb:latest \
+                                    ./bfb \
+                                    --uri "https://${CLEAN_URL}:6334" \
+                                    --collection-name "benchmark" \
+                                    --dim 768 \
+                                    --skip-create \
+                                    --skip-upload \
+                                    --skip-wait-index \
+                                    --search \
+                                    --num-vectors "$NUM_VECTORS" \
+                                    --parallel "$P" \
+                                    --threads "$T" \
+                                    --search-limit 10 \
+                                    --search-hnsw-ef "$EF" \
+                                    --timing-threshold 300.0 \
+                                    --retry 5 \
+                                    --retry-interval 2 \
+                                    --timeout 600 \
+                                    --json "/out/$TEMP_JSON" \
+                                    >>"$BASE_OUTPUT_DIR/benchmark_logs.txt" 2>&1
+
+                                # Capture the exit code of docker
+                                DOCKER_EXIT_CODE=$?
+
+                                if [ $DOCKER_EXIT_CODE -ne 0 ]; then
+                                    echo "DOCKER FAILED with exit code $DOCKER_EXIT_CODE"
+                                    # Continue to next loop iteration instead of crashing
+                                    continue
+                                fi
+
+                                # Capture End Time
+                                END_TIME=$(date +%Y%m%d_%H%M%S)
+
+                                # Process Result
+                                if [ -f "$TEMP_JSON" ]; then
+                                    # Docker often creates files as root, fix permissions
+                                    sudo chmod 666 "$TEMP_JSON"
+
+                                    # Construct Filename with metadata
+                                    FILENAME="run_Opt${max_optimization_threads}_Idx${max_indexing_threads}_Seg${max_segment_size}_SegNum${default_segment_number}_IndTh${indexing_threshold}_P${P}_T${T}_EF${EF}_start${START_TIME}_end${END_TIME}.json"
+                                    mv "$TEMP_JSON" "${RAW_DATA_DIR}/${FILENAME}"
+
+                                    echo "Done. Saved."
+                                else
+                                    echo "FAILED. No output generated."
+                                fi
+
+                                # Short cooldown to let the server breathe
+                                sleep 10
+                            done
+                        done
+                    done
+                    # ---------------------------------------------------------
+                    # STEP 6: STOP WRITES (THE "NUCLEAR" CLEANUP option)
+                    # ---------------------------------------------------------
+                    echo "Stopping background writes and ensuring TOTAL cleanup..."
+
+                    # The common string shared by parent AND all multiprocessing children
+                    # based on your logs:
+                    TARGET_PROCESS_PATTERN=".venv/bin/python3"
+
+                    # 1. Send polite terminate signal (SIGTERM) to EVERYTHING matching the venv python
+                    # This hits the parent prepare_data.py AND all multiprocessing.forkserver children
+                    pkill -f "$TARGET_PROCESS_PATTERN"
+
+                    # 2. ACTIVELY WAIT for processes to actually disappear from the process list
+                    echo -n "   Waiting for all venv python processes to release memory and exit..."
+                    WAIT_CYCLES=0
+                    # pgrep -f returns true (0) as long as it finds ANY process matching the pattern
+                    while pgrep -f "$TARGET_PROCESS_PATTERN" > /dev/null; do
+                        sleep 1
+                        WAIT_CYCLES=$((WAIT_CYCLES+1))
+
+                        # If they haven't died after 20 seconds, get aggressive
+                        if [ "$WAIT_CYCLES" -ge 20 ]; then
+                            echo ""
+                            echo "WARNING: Processes taking too long to die. Issuing SIGKILL (force kill)..."
+                            # -9 sends SIGKILL, which cannot be ignored.
+                            pkill -9 -f "$TARGET_PROCESS_PATTERN"
+                            # Give the OS a moment to reclaim the shredded memory
+                            sleep 5
+                            break
+                        fi
+                        echo -n "."
+                    done
+                    echo " Done. All python processes from this venv are dead."
+
+                    # Clear the PID variable just in case, though the process is definitely gone now.
+                    BG_PID=""
+                    # A final cooldown to ensure OS memory counters update before next run
+                    sleep 5
+                done
+            done
         done
     done
 done
 
 echo "========================================================"
-echo "🎉 Benchmark Grid Complete!"
+echo "Benchmark Grid Complete!"
 echo "Files located in: $RAW_DATA_DIR"

@@ -95,3 +95,12 @@ This is about the expected result for the benchmark:
 
 
 
+<!-- start -->
+
+chmod +x bfb_grid.sh sidecar_v3_ultimate.sh
+
+source .env
+./sidecar_v3_ultimate.sh
+
+source .env
+./bfb_grid.sh
