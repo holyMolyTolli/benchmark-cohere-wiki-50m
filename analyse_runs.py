@@ -194,13 +194,17 @@ def compute_benchmark_metrics(file_list):
         # --- 1. Extract Settings from Filename ---
         filename = os.path.basename(filepath)
         # 'run_Opt"auto"_Idx1_Seg2000000_SegNum200_IndTh200000_P8_T2_EF32_start20260106_115743_end20260106_115900.json'
-        # filename = filename.replace("\"auto\"", "auto")
-        match = re.search(r"run_Opt(\"auto\"|\d+)_Idx(\d+)_Seg(\d+)_SegNum(\d+)_IndTh(\d+)_P(\d+)_T(\d+)_EF(\d+)", filename)
+        # filename = 'run_Opt"auto"_Idx4_Seg150000_SegNum0_IndTh20000_P8_T2_EF32_OptimizerCpuBudget8_AsyncScorertrue_start20260109_162255_end20260109_162316.json'
 
-        if match:
-            max_optimization_threads, max_indexing_threads, max_segment_size, default_segment_number, indexing_threshold, parallel, threads, hnsw_ef = match.groups()
+        patterns = {"max_optimization_threads": r'_Opt("auto"|\d+)_', "max_indexing_threads": r"_Idx(\d+)_", "max_segment_size": r"_Seg(\d+)_", "default_segment_number": r"_SegNum(\d+)_", "indexing_threshold": r"_IndTh(\d+)_", "parallel": r"_P(\d+)_", "threads": r"_T(\d+)_", "hnsw_ef": r"_EF(\d+)_", "optimizer_cpu_budget": r"_OptimizerCpuBudget(\d+)_", "async_scorer": r"_AsyncScorer(true|false)_"}
+
+        entry = {"filename": filename, "start_time": start_time, "end_time": end_time}
+        for key, pattern in patterns.items():
+            match = re.search(pattern, filename)
+            if match:
+                entry[key] = match.group(1)
         else:
-            max_optimization_threads, max_indexing_threads, max_segment_size, default_segment_number, indexing_threshold, parallel, threads, hnsw_ef = (None, None, None, None, None, None, None, None)
+            entry[key] = "DEFAULT_VALUE"
 
         # --- 2. Load JSON Data ---
         with open(filepath, "r") as f:
@@ -224,7 +228,10 @@ def compute_benchmark_metrics(file_list):
         rps_stats = calc_stats(rps_raw, include_percentiles=False)
 
         # --- 4. Structure Output ---
-        entry = {"filename": filename, "start_time": start_time, "end_time": end_time, "max_optimization_threads": max_optimization_threads, "max_indexing_threads": max_indexing_threads, "max_segment_size": max_segment_size, "default_segment_number": default_segment_number, "indexing_threshold": indexing_threshold, "parallel": parallel, "threads": threads, "hnsw_ef": hnsw_ef, **{"search_" + k: v for k, v in search_stats.items()}, **{"server_" + k: v for k, v in server_stats.items()}, **{"rps_" + k: v for k, v in rps_stats.items()}}
+        entry.update(**{"search_" + k: v for k, v in search_stats.items()})
+        entry.update(**{"server_" + k: v for k, v in server_stats.items()})
+        entry.update(**{"rps_" + k: v for k, v in rps_stats.items()})
+
         results.append(entry)
 
     return results
@@ -247,8 +254,8 @@ def find_experiment_for_timestamp(timestamp):
 # ==========================================
 
 # get benchmark data
-files = glob.glob(os.path.join(BENCHMARK_FOLDER, "*.json"))
-benchmark_metrics = compute_benchmark_metrics(files)
+file_list = glob.glob(os.path.join(BENCHMARK_FOLDER, "*.json"))
+benchmark_metrics = compute_benchmark_metrics(file_list)
 benchmark_df = pd.DataFrame(benchmark_metrics)
 benchmark_df = benchmark_df.sort_values(by=["parallel", "hnsw_ef", "threads", "max_optimization_threads", "max_indexing_threads", "max_segment_size", "default_segment_number", "indexing_threshold"])
 
@@ -305,234 +312,216 @@ final_stats.columns = ["_".join(col).strip("_") for col in final_stats.columns.v
 stats_df_merged = final_stats.merge(benchmark_df, on="filename", how="outer")
 
 # Save
-columns_of_interest = ["filename", "max_optimization_threads", "max_indexing_threads", "default_segment_number", "max_segment_size", "indexing_threshold", "parallel", "threads", "hnsw_ef", "rps_median", "server_p99", "server_p95"] + [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
+columns_of_interest = ["filename", "max_optimization_threads", "max_indexing_threads", "default_segment_number", "max_segment_size", "indexing_threshold", "parallel", "threads", "hnsw_ef", "rps_median", "server_p99"] + [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
 stats_df_merged[columns_of_interest].to_csv(os.path.join(BASE_OUTPUT_DIR, "benchmark_summary_hardware.csv"), index=False)
 
 
+# # ----------------------
 
 
+# def flatten_any(d, parent_key="", sep="_"):
+#     items = []
+
+#     if isinstance(d, dict):
+#         for k, v in d.items():
+#             new_key = f"{parent_key}{sep}{k}" if parent_key else k
+#             items.extend(flatten_any(v, new_key, sep=sep).items())
+#     elif isinstance(d, list):
+#         items.append((parent_key, str(d)))
+#     else:
+#         items.append((parent_key, d))
+#     return dict(items)
 
 
+# def remove_fields_and_lists(d, fields_to_remove):
+#     if isinstance(d, dict):
+#         items = {}
+#         if any([v in fields_to_remove for v in d.values()]):
+#             return items
+#         d = d.copy()
+#         for k, v in d.items():
+#             if k not in fields_to_remove:
+#                 items[k] = remove_fields_and_lists(v, fields_to_remove)
+#         return items
+#     elif isinstance(d, list):
+#         return []
+#     else:
+#         return d
 
 
+# row_list = []
+# vector_row_list = []
+# payload_row_list = []
+
+# collections = telemetry_data["result"]["collections"]["collections"]
+# for collection in collections:
+#     shards = collection.get("shards", [])
+#     if isinstance(shards, dict):
+#         shards = [shards]
+#     for shard in shards:
+#         if shard.get("local", {}):
+#             segments = shard.get("local", {}).get("segments", [])
+#         else:
+#             segments = []
+#         for segment_index, segment in enumerate(segments):
+
+#             fields_to_remove = []
+#             for vector_index_search in segment.get("vector_index_searches", []):
+#                 vector_row = flatten_any(vector_index_search.copy(), parent_key="vector")
+#                 vector_row["collection_id"] = collection["id"]
+#                 vector_row["shard_id"] = shard["id"]
+#                 vector_row["segment_index"] = segment_index
+#                 vector_name = vector_row["vector_index_name"]
+#                 fields_to_remove.append(vector_name)
+
+#                 flat_info = flatten_any(segment["info"]["vector_data"][vector_name], parent_key="vector")
+#                 for k, v in flat_info.items():
+#                     if k not in vector_row:
+#                         vector_row[k] = v
+#                     else:
+#                         assert False
+
+#                 flat_config = flatten_any(segment["config"]["vector_data"][vector_name], parent_key="vector")
+#                 for k, v in flat_config.items():
+#                     if k not in vector_row:
+#                         vector_row[k] = v
+#                     else:
+#                         assert False
+
+#                 vector_row_list.append(vector_row)
+
+#             for payload_field_index in segment.get("payload_field_indices", []):
+#                 payload_row = flatten_any(payload_field_index.copy(), parent_key="payload")
+#                 payload_row["collection_id"] = collection["id"]
+#                 payload_row["shard_id"] = shard["id"]
+#                 payload_row["segment_index"] = segment_index
+#                 payload_name = payload_row["payload_field_name"]
+#                 fields_to_remove.append(payload_name)
+
+#                 flat_info = flatten_any(segment["info"]["index_schema"][payload_name], parent_key="payload")
+#                 for k, v in flat_info.items():
+#                     if k not in payload_row:
+#                         payload_row[k] = v
+#                     else:
+#                         assert False
+
+#                 payload_row_list.append(payload_row)
+
+#             row = {}
+#             # cluster
+#             cluster_result_keys = ["id", "app", "cluster", "memory"]
+#             for k in cluster_result_keys:
+#                 for k, v in flatten_any(telemetry_data["result"][k], parent_key="cluster").items():
+#                     row[k] = v
+
+#             # collection
+#             for k, v in flatten_any(remove_fields_and_lists(collection.copy(), list(set(fields_to_remove))), parent_key="collection").items():
+#                 row[k] = v
+#             if row["collection_id"] in telemetry_data["result"]["hardware"]["collection_data"]:
+#                 for k, v in flatten_any(telemetry_data["result"]["hardware"]["collection_data"][row["collection_id"]], parent_key="collection").items():
+#                     row[k] = v
+
+#             # shard
+#             for k, v in flatten_any(remove_fields_and_lists(shard.copy(), list(set(fields_to_remove))), parent_key="shard").items():
+#                 row[k] = v
+
+#             # segment
+#             row["segment_index"] = segment_index
+#             for k, v in flatten_any(remove_fields_and_lists(segment.copy(), list(set(fields_to_remove))), parent_key="segment").items():
+#                 row[k] = v
+
+#             cleaned_row = {}
+#             for k, v in row.items():
+#                 if v != "[]":
+#                     cleaned_row[k] = v
+#             row_list.append(cleaned_row)
 
 
+# payload_df = pd.DataFrame(payload_row_list)
+# vector_df = pd.DataFrame(vector_row_list)
+# segment_df = pd.DataFrame(row_list)
 
 
+# # -------------------------------------------------------------
 
 
+# def get_value(df, value):
+#     for column in df.columns:
+#         if column.endswith(value):
+#             level = column.split("_")[0]
+#             if level in index_dict:
+#                 index = index_dict[level]
+#                 level_df = df.drop_duplicates(subset=index)
+#             else:
+#                 level_df = df
+
+#             summ = level_df[column].sum()
+
+#             if "bytes" in column or "size" in column or "memory" in column:
+#                 # 1. '..._BYTES' columns are already in Bytes.
+#                 # 2. '...RAM_SIZE' or '...DISK_SIZE' (without 'bytes') come from sysinfo as Kilobytes.
+#                 if "bytes" not in column and ("ram_size" in column or "disk_size" in column):
+#                     # Convert KB to Bytes
+#                     summ_bytes = summ * 1024
+#                 else:
+#                     # Already in Bytes
+#                     summ_bytes = summ
+
+#                 # Calculate GB and MB based on the normalized byte count
+#                 gb_val = summ_bytes / (1024**3)
+#                 mb_val = summ_bytes / (1024**2)
+
+#                 if gb_val >= 1:
+#                     formatted_sum = f"{summ:,}  (~{gb_val:.2f} GB)"
+#                 elif mb_val >= 1:
+#                     formatted_sum = f"{summ:,}  (~{mb_val:.2f} MB)"
+#                 else:
+#                     # Optional: Handle very small values (KB)
+#                     kb_val = summ_bytes / 1024
+#                     formatted_sum = f"{summ:,}  (~{kb_val:.2f} KB)"
+#             else:
+#                 formatted_sum = f"{summ:,}"
+
+#             print(f"--- source column: {column.upper()}")
+#             print(f"TOTAL IN CLUSTER: {formatted_sum}")
+#             if level != "cluster" and summ > 0:
+#                 collection_index = index_dict["collection"]
+#                 grouped_df = level_df.groupby(collection_index)[column].sum().sort_values(ascending=False)
+#                 assert grouped_df.sum() == summ
+#                 print(f"TOP 10 PER {grouped_df[:10]}")
+#             print("---\n")
+
+#             # return column
 
 
+# index_dict = {"cluster": ["cluster"], "collection": ["collection_id"], "shard": ["collection_id", "shard_id"], "segment": ["collection_id", "shard_id", "segment_index"]}
+
+# # disc ressource = SHARD_LOCAL_VECTORS_SIZE_BYTES = SHARD_LOCAL_VECTORS_SIZE_BYTES = 34.27 GB
+# # disc ressource = SHARD_LOCAL_PAYLOADS_SIZE_BYTES = SEGMENT_INFO_PAYLOADS_SIZE_BYTES = 5.93 GB
+# # Cache (on disc = false) = RAM = disc ressource
+# # ram max = CLUSTER_SYSTEM_RAM_SIZE = 64 GB
 
 
+# print("=============== General Stats ================")
+# # total number of collections
+# total_collections = segment_df[index_dict["collection"]].drop_duplicates().shape[0]
+# print(f"Total number of collections: {total_collections}")
 
-# ----------------------
+# # total number of shards
+# total_shards = segment_df[index_dict["shard"]].drop_duplicates().shape[0]
+# print(f"Total number of shards: {total_shards}")
 
+# # total number of segments
+# total_segments = segment_df[index_dict["segment"]].drop_duplicates().shape[0]
+# print(f"Total number of segments: {total_segments}")
 
+# # number of segments per collection
+# segments_per_collection = segment_df[index_dict["segment"]].drop_duplicates().groupby(index_dict["collection"])["segment_index"].count().sort_values(ascending=False)[:10]
+# print("\n=============== Segment Count ================")
+# print(f"TOP 10 PER {segments_per_collection}")
 
-def flatten_any(d, parent_key="", sep="_"):
-    items = []
-
-    if isinstance(d, dict):
-        for k, v in d.items():
-            new_key = f"{parent_key}{sep}{k}" if parent_key else k
-            items.extend(flatten_any(v, new_key, sep=sep).items())
-    elif isinstance(d, list):
-        items.append((parent_key, str(d)))
-    else:
-        items.append((parent_key, d))
-    return dict(items)
-
-
-def remove_fields_and_lists(d, fields_to_remove):
-    if isinstance(d, dict):
-        items = {}
-        if any([v in fields_to_remove for v in d.values()]):
-            return items
-        d = d.copy()
-        for k, v in d.items():
-            if k not in fields_to_remove:
-                items[k] = remove_fields_and_lists(v, fields_to_remove)
-        return items
-    elif isinstance(d, list):
-        return []
-    else:
-        return d
-
-
-row_list = []
-vector_row_list = []
-payload_row_list = []
-
-collections = telemetry_data["result"]["collections"]["collections"]
-for collection in collections:
-    shards = collection.get("shards", [])
-    if isinstance(shards, dict):
-        shards = [shards]
-    for shard in shards:
-        if shard.get("local", {}):
-            segments = shard.get("local", {}).get("segments", [])
-        else:
-            segments = []
-        for segment_index, segment in enumerate(segments):
-
-            fields_to_remove = []
-            for vector_index_search in segment.get("vector_index_searches", []):
-                vector_row = flatten_any(vector_index_search.copy(), parent_key="vector")
-                vector_row["collection_id"] = collection["id"]
-                vector_row["shard_id"] = shard["id"]
-                vector_row["segment_index"] = segment_index
-                vector_name = vector_row["vector_index_name"]
-                fields_to_remove.append(vector_name)
-
-                flat_info = flatten_any(segment["info"]["vector_data"][vector_name], parent_key="vector")
-                for k, v in flat_info.items():
-                    if k not in vector_row:
-                        vector_row[k] = v
-                    else:
-                        assert False
-
-                flat_config = flatten_any(segment["config"]["vector_data"][vector_name], parent_key="vector")
-                for k, v in flat_config.items():
-                    if k not in vector_row:
-                        vector_row[k] = v
-                    else:
-                        assert False
-
-                vector_row_list.append(vector_row)
-
-            for payload_field_index in segment.get("payload_field_indices", []):
-                payload_row = flatten_any(payload_field_index.copy(), parent_key="payload")
-                payload_row["collection_id"] = collection["id"]
-                payload_row["shard_id"] = shard["id"]
-                payload_row["segment_index"] = segment_index
-                payload_name = payload_row["payload_field_name"]
-                fields_to_remove.append(payload_name)
-
-                flat_info = flatten_any(segment["info"]["index_schema"][payload_name], parent_key="payload")
-                for k, v in flat_info.items():
-                    if k not in payload_row:
-                        payload_row[k] = v
-                    else:
-                        assert False
-
-                payload_row_list.append(payload_row)
-
-            row = {}
-            # cluster
-            cluster_result_keys = ["id", "app", "cluster", "memory"]
-            for k in cluster_result_keys:
-                for k, v in flatten_any(telemetry_data["result"][k], parent_key="cluster").items():
-                    row[k] = v
-
-            # collection
-            for k, v in flatten_any(remove_fields_and_lists(collection.copy(), list(set(fields_to_remove))), parent_key="collection").items():
-                row[k] = v
-            if row["collection_id"] in telemetry_data["result"]["hardware"]["collection_data"]:
-                for k, v in flatten_any(telemetry_data["result"]["hardware"]["collection_data"][row["collection_id"]], parent_key="collection").items():
-                    row[k] = v
-
-            # shard
-            for k, v in flatten_any(remove_fields_and_lists(shard.copy(), list(set(fields_to_remove))), parent_key="shard").items():
-                row[k] = v
-
-            # segment
-            row["segment_index"] = segment_index
-            for k, v in flatten_any(remove_fields_and_lists(segment.copy(), list(set(fields_to_remove))), parent_key="segment").items():
-                row[k] = v
-
-            cleaned_row = {}
-            for k, v in row.items():
-                if v != "[]":
-                    cleaned_row[k] = v
-            row_list.append(cleaned_row)
-
-
-payload_df = pd.DataFrame(payload_row_list)
-vector_df = pd.DataFrame(vector_row_list)
-segment_df = pd.DataFrame(row_list)
-
-
-# -------------------------------------------------------------
-
-
-def get_value(df, value):
-    for column in df.columns:
-        if column.endswith(value):
-            level = column.split("_")[0]
-            if level in index_dict:
-                index = index_dict[level]
-                level_df = df.drop_duplicates(subset=index)
-            else:
-                level_df = df
-
-            summ = level_df[column].sum()
-
-            if "bytes" in column or "size" in column or "memory" in column:
-                # 1. '..._BYTES' columns are already in Bytes.
-                # 2. '...RAM_SIZE' or '...DISK_SIZE' (without 'bytes') come from sysinfo as Kilobytes.
-                if "bytes" not in column and ("ram_size" in column or "disk_size" in column):
-                    # Convert KB to Bytes
-                    summ_bytes = summ * 1024
-                else:
-                    # Already in Bytes
-                    summ_bytes = summ
-
-                # Calculate GB and MB based on the normalized byte count
-                gb_val = summ_bytes / (1024**3)
-                mb_val = summ_bytes / (1024**2)
-
-                if gb_val >= 1:
-                    formatted_sum = f"{summ:,}  (~{gb_val:.2f} GB)"
-                elif mb_val >= 1:
-                    formatted_sum = f"{summ:,}  (~{mb_val:.2f} MB)"
-                else:
-                    # Optional: Handle very small values (KB)
-                    kb_val = summ_bytes / 1024
-                    formatted_sum = f"{summ:,}  (~{kb_val:.2f} KB)"
-            else:
-                formatted_sum = f"{summ:,}"
-
-            print(f"--- source column: {column.upper()}")
-            print(f"TOTAL IN CLUSTER: {formatted_sum}")
-            if level != "cluster" and summ > 0:
-                collection_index = index_dict["collection"]
-                grouped_df = level_df.groupby(collection_index)[column].sum().sort_values(ascending=False)
-                assert grouped_df.sum() == summ
-                print(f"TOP 10 PER {grouped_df[:10]}")
-            print("---\n")
-
-            # return column
-
-
-index_dict = {"cluster": ["cluster"], "collection": ["collection_id"], "shard": ["collection_id", "shard_id"], "segment": ["collection_id", "shard_id", "segment_index"]}
-
-# disc ressource = SHARD_LOCAL_VECTORS_SIZE_BYTES = SHARD_LOCAL_VECTORS_SIZE_BYTES = 34.27 GB
-# disc ressource = SHARD_LOCAL_PAYLOADS_SIZE_BYTES = SEGMENT_INFO_PAYLOADS_SIZE_BYTES = 5.93 GB
-# Cache (on disc = false) = RAM = disc ressource
-# ram max = CLUSTER_SYSTEM_RAM_SIZE = 64 GB
-
-
-print("=============== General Stats ================")
-# total number of collections
-total_collections = segment_df[index_dict["collection"]].drop_duplicates().shape[0]
-print(f"Total number of collections: {total_collections}")
-
-# total number of shards
-total_shards = segment_df[index_dict["shard"]].drop_duplicates().shape[0]
-print(f"Total number of shards: {total_shards}")
-
-# total number of segments
-total_segments = segment_df[index_dict["segment"]].drop_duplicates().shape[0]
-print(f"Total number of segments: {total_segments}")
-
-# number of segments per collection
-segments_per_collection = segment_df[index_dict["segment"]].drop_duplicates().groupby(index_dict["collection"])["segment_index"].count().sort_values(ascending=False)[:10]
-print("\n=============== Segment Count ================")
-print(f"TOP 10 PER {segments_per_collection}")
-
-values = ["active_bytes", "resident_bytes", "disk_size", "ram_size", "features_gpu", "num_points", "num_vectors", "num_deleted_vectors", "num_indexed_vectors", "vectors_size_bytes", "payloads_size_bytes", "disk_usage_bytes", "ram_usage_bytes", "shard_number", "on_disk", "always_ram"]  #
-for value in values:
-    print(f"\n=============== {value} ================")
-    for df in [segment_df, vector_df, payload_df]:
-        get_value(df, value)
+# values = ["active_bytes", "resident_bytes", "disk_size", "ram_size", "features_gpu", "num_points", "num_vectors", "num_deleted_vectors", "num_indexed_vectors", "vectors_size_bytes", "payloads_size_bytes", "disk_usage_bytes", "ram_usage_bytes", "shard_number", "on_disk", "always_ram"]  #
+# for value in values:
+#     print(f"\n=============== {value} ================")
+#     for df in [segment_df, vector_df, payload_df]:
+#         get_value(df, value)
