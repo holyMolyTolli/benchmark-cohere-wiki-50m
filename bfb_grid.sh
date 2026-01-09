@@ -8,7 +8,7 @@ source .venv/bin/activate
 RAW_DATA_DIR="${BASE_OUTPUT_DIR}/raw_benchmark_data"
 TEMP_JSON="tmp_res.json"
 COLLECTION_NAME="benchmark"
-
+CLUSTER_ID="cd380b7e-3650-4152-81ee-424a96bece8b"
 # --- GRID ---
 MAX_OPTIMIZATION_THREADS_LIST=(\"auto\" 2) # \"auto\" 0 1 2 4
 # If null - have no limit and choose dynamically to saturate CPU.
@@ -25,6 +25,10 @@ MAX_SEGMENT_SIZE_LIST=(150000 200000 250000) # **null????** 20000 200000 2000000
 
 INDEXING_THRESHOLD_LIST=(20000) # 0 2000 20000 200000
 # To explicitly disable vector indexing, set to `0`.
+
+MAX_SEARCH_THREADS_LIST=(2 4 8 0)
+OPTIMIZER_CPU_BUDGET_LIST=(0 4 8 12 -4)
+ASYNC_SCORER_LIST=(true false)
 
 PARALLEL_LIST=(8)
 THREADS_LIST=(2)
@@ -81,17 +85,63 @@ get_point_count() {
         -H "api-key: ${QDRANT_API_KEY}" | jq -r '.result.points_count'
 }
 
+
+wait_for_cluster_ready() {
+    echo -n "   Waiting for Cluster configuration to apply (Rolling Update)..."
+    
+    # 1. Wait for status to potentially switch to 'UPDATING' (give it a moment to register)
+    sleep 5 
+
+    while true; do
+        # We query the Cloud API, not the database directly
+        RESPONSE=$(curl -s -X GET "https://api.cloud.qdrant.io/v1/clusters/${CLUSTER_ID}" \
+            -H "Authorization: Bearer ${QDRANT_CLOUD_API_KEY}")
+        
+        STATUS=$(echo "$RESPONSE" | jq -r '.result.status')
+        
+        # Status can be 'active', 'updating', 'maintenance', etc.
+        if [ "$STATUS" == "active" ]; then
+            echo " OK (Cluster is Active)."
+            break
+        fi
+        
+        echo -n "."
+        sleep 5
+    done
+    
+    # 2. Even after Cloud says "Active", wait for the actual HTTP port 6333 to be reachable again
+    echo -n "   Waiting for DB Port 6333 to respond..."
+    until curl -s -f -o /dev/null "https://${CLEAN_URL}:6333/collections"; do
+        echo -n "."
+        sleep 2
+    done
+    echo " OK."
+}
+
+
 apply_tuning() {
     local max_segment_size=$1
     local default_segment_number=$2
     local max_optimization_threads=$3
     local max_indexing_threads=$4
     local indexing_threshold=$5
-    echo "Applying Tuning: max_optimization_threads=$max_optimization_threads | max_segment_size=$max_segment_size | default_segment_number=$default_segment_number | max_indexing_threads=$max_indexing_threads | indexing_threshold=$indexing_threshold"
+    local max_search_threads=$6
+    local optimizer_cpu_budget=$7
+    local async_scorer=$8
+
+    echo ">>> Applying Collection Params (Hot Update)..."
+
+    # Handle "auto" vs integer logic for JSON
+    if [ "$max_optimization_threads" == "auto" ] || [ "$max_optimization_threads" == "\"auto\"" ]; then
+        JSON_OPT_THREADS="null"
+    else
+        JSON_OPT_THREADS=$max_optimization_threads
+    fi
+
     curl -s -X PATCH "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
         -H "api-key: ${QDRANT_API_KEY}" \
         -H "Content-Type: application/json" \
-    --data-raw "{
+        --data-raw "{
         \"optimizers_config\": {
             \"max_optimization_threads\": $max_optimization_threads,
             \"max_segment_size\": $max_segment_size,
@@ -101,7 +151,42 @@ apply_tuning() {
         \"hnsw_config\": {
             \"max_indexing_threads\": $max_indexing_threads
         }
-        }"
+    }"
+
+
+    # Curl Command Example:
+    curl -X PATCH https://api.${CLEAN_URL}:6333/v1/clusters/${CLUSTER_ID} \
+      -H "api-key: ${QDRANT_API_KEY}" \
+      -H "Content-Type: application/json" \
+      --d "{
+        \"configuration\": {
+          \"database_configuration\": {
+            \"storage\": {
+              \"performance\": {
+                \"optimizer_cpu_budget\": $optimizer_cpu_budget,
+                \"async_scorer\": $async_scorer
+              }
+            }
+          }
+        }
+    }"
+
+    curl -X PATCH https://api.${CLEAN_URL}:6333/v1/clusters/${CLUSTER_ID} \
+    -H "api-key: ${QDRANT_API_KEY}" \
+    -H "Content-Type: application/json" \
+    --d "{
+        \"configuration\": {
+            \"database_configuration\": {
+                \"storage\": {
+                    \"performance\": {
+                        \"max_search_threads\": $max_search_threads
+                    }
+                    }
+                }
+            }
+        }\"
+    }"
+
 
     # get collection info and check if the config is applied
     COLLECTION_INFO=$(curl -s -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
@@ -146,6 +231,27 @@ apply_tuning() {
         echo "ERROR: max_indexing_threads not applied. Expected $max_indexing_threads, got $MAX_INDEXING_THREADS"
         exit 1
     fi
+
+    # # check max_search_threads
+    # MAX_SEARCH_THREADS=$(echo $COLLECTION_INFO | jq -r '.result.config.storage_config.max_search_threads')
+    # if [ "$MAX_SEARCH_THREADS" != "$max_search_threads" ]; then
+    #     echo "ERROR: max_search_threads not applied. Expected $max_search_threads, got $MAX_SEARCH_THREADS"
+    #     exit 1
+    # fi
+
+    # check optimizer_cpu_budget
+    OPTIMIZER_CPU_BUDGET=$(echo $COLLECTION_INFO | jq -r '.result.config.storage_config.optimizer_cpu_budget')
+    if [ "$OPTIMIZER_CPU_BUDGET" != "$optimizer_cpu_budget" ]; then
+        echo "ERROR: optimizer_cpu_budget not applied. Expected $optimizer_cpu_budget, got $OPTIMIZER_CPU_BUDGET"
+        exit 1
+    fi
+
+    # check async_scorer
+    ASYNC_SCORER=$(echo $COLLECTION_INFO | jq -r '.result.config.storage_config.async_scorer')
+    if [ "$ASYNC_SCORER" != "$async_scorer" ]; then
+        echo "ERROR: async_scorer not applied. Expected $async_scorer, got $ASYNC_SCORER"
+        exit 1
+    fi
 }
 
 # ==============================================================================
@@ -171,134 +277,140 @@ for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
         for max_optimization_threads in "${MAX_OPTIMIZATION_THREADS_LIST[@]}"; do
             for max_indexing_threads in "${MAX_INDEXING_THREADS_LIST[@]}"; do
                 for indexing_threshold in "${INDEXING_THRESHOLD_LIST[@]}"; do
-                    echo "----------------------------------------------------------------"
-                    echo "NEW CONFIGURATION: max_segment_size=$max_segment_size | default_segment_number=$default_segment_number | max_optimization_threads=$max_optimization_threads | max_indexing_threads=$max_indexing_threads | indexing_threshold=$indexing_threshold"
-                    echo "----------------------------------------------------------------"
+                    for max_search_threads in "${MAX_SEARCH_THREADS_LIST[@]}"; do
+                        for optimizer_cpu_budget in "${OPTIMIZER_CPU_BUDGET_LIST[@]}"; do
+                            for async_scorer in "${ASYNC_SCORER_LIST[@]}"; do
+                                echo "----------------------------------------------------------------"
+                                echo "NEW CONFIGURATION: max_segment_size=$max_segment_size | default_segment_number=$default_segment_number | max_optimization_threads=$max_optimization_threads | max_indexing_threads=$max_indexing_threads | indexing_threshold=$indexing_threshold | max_search_threads=$max_search_threads | optimizer_cpu_budget=$optimizer_cpu_budget | async_scorer=$async_scorer"
+                                echo "----------------------------------------------------------------"
 
-                    # ---------------------------------------------------------
-                    # STEP 1: APPLY TUNING (Server Side)
-                    # ---------------------------------------------------------
-                    echo "Applying Tuning Parameters..."
-                    apply_tuning "$max_segment_size" "$default_segment_number" "$max_optimization_threads" "$max_indexing_threads" "$indexing_threshold"
+                                # ---------------------------------------------------------
+                                # STEP 1: APPLY TUNING (Server Side)
+                                # ---------------------------------------------------------
+                                echo "Applying Tuning Parameters..."
+                                apply_tuning "$max_segment_size" "$default_segment_number" "$max_optimization_threads" "$max_indexing_threads" "$indexing_threshold" "$max_search_threads" "$optimizer_cpu_budget" "$async_scorer"
 
-                    # ---------------------------------------------------------
-                    # STEP 2: RESET TO BASELINE (Blocking)
-                    # ---------------------------------------------------------
-                    echo "Resetting DB to 50M baseline..."
-                    export LIMIT_POINTS=50000000
+                                # ---------------------------------------------------------
+                                # STEP 2: RESET TO BASELINE (Blocking)
+                                # ---------------------------------------------------------
+                                echo "Resetting DB to 50M baseline..."
+                                export LIMIT_POINTS=50000000
 
-                    # We run this in foreground (no &) because we must wait for it to finish cleaning
-                    # I do this here ech time i reset the configuration because i want to be sure the db is clean and ready for the next experiment and to make experiments comparable. deleting is relatively fast and i have to wait for green status anyway after upodating ther config.
-                    python3 upload/prepare_data.py
-                    sleep 2
+                                # We run this in foreground (no &) because we must wait for it to finish cleaning
+                                # I do this here ech time i reset the configuration because i want to be sure the db is clean and ready for the next experiment and to make experiments comparable. deleting is relatively fast and i have to wait for green status anyway after upodating ther config.
+                                python3 upload/prepare_data.py
+                                sleep 2
 
-                    # ---------------------------------------------------------
-                    # STEP 3: WAIT FOR GREEN STATUS
-                    # ---------------------------------------------------------
-                    wait_for_green
+                                # ---------------------------------------------------------
+                                # STEP 3: WAIT FOR GREEN STATUS
+                                # ---------------------------------------------------------
+                                wait_for_green
 
-                    # ---------------------------------------------------------
-                    # STEP 4: START BACKGROUND WRITES
-                    # ---------------------------------------------------------
-                    CURRENT_VECTORS=$(get_point_count)
+                                # ---------------------------------------------------------
+                                # STEP 4: START BACKGROUND WRITES
+                                # ---------------------------------------------------------
+                                CURRENT_VECTORS=$(get_point_count)
 
-                    echo "Starting Concurrent Writes..."
-                    export LIMIT_POINTS=100000000 # 100M vectors is just a large number. I just want to upload concurrently in background and will stop the upload once the experiment is done.
+                                echo "Starting Concurrent Writes..."
+                                export LIMIT_POINTS=100000000 # 100M vectors is just a large number. I just want to upload concurrently in background and will stop the upload once the experiment is done.
 
-                    # Start in background & save PID
-                    python3 upload/prepare_data.py >/dev/null 2>&1 &
-                    BG_PID=$!
+                                # Start in background & save PID
+                                python3 upload/prepare_data.py >/dev/null 2>&1 &
+                                BG_PID=$!
 
-                    # ---------------------------------------------------------
-                    # STEP 3: WAIT FOR 5XM VECTORS
-                    # ---------------------------------------------------------
-                    TARGET_VECTORS=$((CURRENT_VECTORS + 1000000))
-                    echo -n "   Waiting for $TARGET_VECTORS vectors..."
-                    while true; do
-                        VECTORS=$(get_point_count)
-                        # SAFETY CHECK: Did the python script die?
-                        if ! kill -0 $BG_PID 2>/dev/null; then
-                            echo " ERROR: Background uploader died! Stopping this run."
-                            break
-                        fi
-                        if [ "$VECTORS" -ge "$TARGET_VECTORS" ]; then
-                            echo " OK."
-                            break
-                        fi
-                        sleep 1
-                    done
+                                # ---------------------------------------------------------
+                                # STEP 3: WAIT FOR 5XM VECTORS
+                                # ---------------------------------------------------------
+                                TARGET_VECTORS=$((CURRENT_VECTORS + 1000000))
+                                echo -n "   Waiting for $TARGET_VECTORS vectors..."
+                                while true; do
+                                    VECTORS=$(get_point_count)
+                                    # SAFETY CHECK: Did the python script die?
+                                    if ! kill -0 $BG_PID 2>/dev/null; then
+                                        echo " ERROR: Background uploader died! Stopping this run."
+                                        break
+                                    fi
+                                    if [ "$VECTORS" -ge "$TARGET_VECTORS" ]; then
+                                        echo " OK."
+                                        break
+                                    fi
+                                    sleep 1
+                                done
 
-                    # ---------------------------------------------------------
-                    # STEP 5: RUN READ BENCHMARK
-                    # ---------------------------------------------------------
-                    for P in "${PARALLEL_LIST[@]}"; do
-                        for T in "${THREADS_LIST[@]}"; do
-                            for EF in "${SEARCH_HNSW_EF_LIST[@]}"; do
+                                # ---------------------------------------------------------
+                                # STEP 5: RUN READ BENCHMARK
+                                # ---------------------------------------------------------
+                                for P in "${PARALLEL_LIST[@]}"; do
+                                    for T in "${THREADS_LIST[@]}"; do
+                                        for EF in "${SEARCH_HNSW_EF_LIST[@]}"; do
 
-                                # heuristic: scale vectors based on parallelism, min 5000
-                                NUM_VECTORS=$((P * 150))
-                                if [ "$NUM_VECTORS" -lt 5000 ]; then NUM_VECTORS=5000; fi
+                                            # heuristic: scale vectors based on parallelism, min 5000
+                                            NUM_VECTORS=$((P * 150))
+                                            if [ "$NUM_VECTORS" -lt 5000 ]; then NUM_VECTORS=5000; fi
 
-                                echo -n "Running [P:$P | T:$T | EF:$EF] ... "
+                                            echo -n "Running [P:$P | T:$T | EF:$EF] ... "
 
-                                # Capture Start Time (Format: YYYYMMDD_HHMMSS)
-                                START_TIME=$(date +%Y%m%d_%H%M%S)
+                                            # Capture Start Time (Format: YYYYMMDD_HHMMSS)
+                                            START_TIME=$(date +%Y%m%d_%H%M%S)
 
-                                # --- RUN DOCKER ---
-                                sudo docker run --rm \
-                                    --network host \
-                                    -v "$(pwd):/out" \
-                                    -e QDRANT_API_KEY="$QDRANT_API_KEY" \
-                                    -e RUST_BACKTRACE=1 \
-                                    qdrant/bfb:latest \
-                                    ./bfb \
-                                    --uri "https://${CLEAN_URL}:6334" \
-                                    --collection-name "benchmark" \
-                                    --dim 768 \
-                                    --skip-create \
-                                    --skip-upload \
-                                    --skip-wait-index \
-                                    --search \
-                                    --num-vectors "$NUM_VECTORS" \
-                                    --parallel "$P" \
-                                    --threads "$T" \
-                                    --search-limit 10 \
-                                    --search-hnsw-ef "$EF" \
-                                    --timing-threshold 300.0 \
-                                    --retry 5 \
-                                    --retry-interval 2 \
-                                    --timeout 600 \
-                                    --json "/out/$TEMP_JSON" \
-                                    >>"$BASE_OUTPUT_DIR/benchmark_logs.txt" 2>&1
+                                            # --- RUN DOCKER ---
+                                            sudo docker run --rm \
+                                                --network host \
+                                                -v "$(pwd):/out" \
+                                                -e QDRANT_API_KEY="$QDRANT_API_KEY" \
+                                                -e RUST_BACKTRACE=1 \
+                                                qdrant/bfb:latest \
+                                                ./bfb \
+                                                --uri "https://${CLEAN_URL}:6334" \
+                                                --collection-name "benchmark" \
+                                                --dim 768 \
+                                                --skip-create \
+                                                --skip-upload \
+                                                --skip-wait-index \
+                                                --search \
+                                                --num-vectors "$NUM_VECTORS" \
+                                                --parallel "$P" \
+                                                --threads "$T" \
+                                                --search-limit 10 \
+                                                --search-hnsw-ef "$EF" \
+                                                --timing-threshold 300.0 \
+                                                --retry 5 \
+                                                --retry-interval 2 \
+                                                --timeout 600 \
+                                                --json "/out/$TEMP_JSON" \
+                                                >>"$BASE_OUTPUT_DIR/benchmark_logs.txt" 2>&1
 
-                                # Capture the exit code of docker
-                                DOCKER_EXIT_CODE=$?
+                                            # Capture the exit code of docker
+                                            DOCKER_EXIT_CODE=$?
 
-                                if [ $DOCKER_EXIT_CODE -ne 0 ]; then
-                                    echo "DOCKER FAILED with exit code $DOCKER_EXIT_CODE"
-                                    # Continue to next loop iteration instead of crashing
-                                    continue
-                                fi
+                                            if [ $DOCKER_EXIT_CODE -ne 0 ]; then
+                                                echo "DOCKER FAILED with exit code $DOCKER_EXIT_CODE"
+                                                # Continue to next loop iteration instead of crashing
+                                                continue
+                                            fi
 
-                                # Capture End Time
-                                END_TIME=$(date +%Y%m%d_%H%M%S)
+                                            # Capture End Time
+                                            END_TIME=$(date +%Y%m%d_%H%M%S)
 
-                                # Process Result
-                                if [ -f "$TEMP_JSON" ]; then
-                                    # Docker often creates files as root, fix permissions
-                                    sudo chmod 666 "$TEMP_JSON"
+                                            # Process Result
+                                            if [ -f "$TEMP_JSON" ]; then
+                                                # Docker often creates files as root, fix permissions
+                                                sudo chmod 666 "$TEMP_JSON"
 
-                                    # Construct Filename with metadata
-                                    FILENAME="run_Opt${max_optimization_threads}_Idx${max_indexing_threads}_Seg${max_segment_size}_SegNum${default_segment_number}_IndTh${indexing_threshold}_P${P}_T${T}_EF${EF}_start${START_TIME}_end${END_TIME}.json"
-                                    mv "$TEMP_JSON" "${RAW_DATA_DIR}/${FILENAME}"
+                                                # Construct Filename with metadata
+                                                FILENAME="run_Opt${max_optimization_threads}_Idx${max_indexing_threads}_Seg${max_segment_size}_SegNum${default_segment_number}_IndTh${indexing_threshold}_P${P}_T${T}_EF${EF}_MaxSearchThreads${max_search_threads}_OptimizerCpuBudget${optimizer_cpu_budget}_AsyncScorer${async_scorer}_start${START_TIME}_end${END_TIME}.json"
+                                                mv "$TEMP_JSON" "${RAW_DATA_DIR}/${FILENAME}"
 
-                                    echo "Done. Saved."
-                                else
-                                    echo "FAILED. No output generated."
-                                fi
+                                                echo "Done. Saved."
+                                            else
+                                                echo "FAILED. No output generated."
+                                            fi
 
-                                # Short cooldown to let the server breathe
-                                sleep 10
+                                            # Short cooldown to let the server breathe
+                                            sleep 10
+                                        done
+                                    done
+                                done
                             done
                         done
                     done
