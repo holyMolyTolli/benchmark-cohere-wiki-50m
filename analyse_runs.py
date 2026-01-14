@@ -11,6 +11,7 @@ import pandas as pd
 # ⚙️ CONFIGURATION - EDIT THESE TO MATCH YOUR FILES
 # ==========================================
 
+
 def parse_prometheus_data(filepath):
     metrics = {}
 
@@ -227,8 +228,9 @@ DEFAULT_VALUES = {"max_optimization_threads": "auto", "max_indexing_threads": 0,
 
 result_df_list = []
 for run in range(1, 2):
-    print(f"Processing run {run:02d}")
-    BASE_OUTPUT_DIR = f"{COLLECTION_NAME}_results_rw_{run:02d}"
+    # print(f"Processing run {run:02d}")
+    # BASE_OUTPUT_DIR = f"{COLLECTION_NAME}_results_rw_{run:02d}"
+    BASE_OUTPUT_DIR = os.getenv("BASE_OUTPUT_DIR")
     BENCHMARK_FOLDER = f"{BASE_OUTPUT_DIR}/raw_benchmark_data"
 
     # get benchmark data
@@ -290,17 +292,46 @@ for run in range(1, 2):
     stats_df_merged = final_stats.merge(benchmark_df, on="filepath", how="outer").merge(prometheus_parameter_df, on="filepath", how="outer")
 
     # Save
-    base_columns = ["filepath", "rps_median", "server_p99_ms"]
-    parameter_columns = prometheus_parameter_columns + [param for param in PARAM_PATTERNS.keys()]
-    computed_percentile_columns = [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
-
-    columns_of_interest = base_columns + parameter_columns + computed_percentile_columns
-    columns_to_save = ['filepath', 'rps_median', 'server_p99_ms', 'qdrant_collection_config_optimizer_max_optimization_threads', 'max_optimization_threads', 'qdrant_collection_config_hnsw_max_indexing_threads', 'max_indexing_threads', 'qdrant_collection_config_optimizer_default_segment_number', 'default_segment_number', 'qdrant_collection_config_optimizer_max_segment_size', 'max_segment_size', 'qdrant_collection_config_optimizer_indexing_threshold', 'indexing_threshold', 'optimizer_cpu_budget', 'async_scorer', 'parallel', 'threads', 'hnsw_ef', 'client_cpu_%_median', 'client_cpu_%_max', 'client_ram_%_median', 'client_ram_%_max', 'client_in_%_median', 'client_in_%_max', 'client_out_%_median', 'client_out_%_max', 'server_ram_%_median', 'server_ram_%_max', 'server_disk_%_median', 'server_disk_%_max', 'server_cpu_%_median', 'server_cpu_%_max']
+    # base_columns = ["filepath", "rps_median", "server_p99_ms"]
+    # parameter_columns = prometheus_parameter_columns + [param for param in PARAM_PATTERNS.keys()]
+    # computed_percentile_columns = [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
+    # columns_to_save = base_columns + parameter_columns + computed_percentile_columns
+    columns_to_save = [
+        "filepath",
+        "rps_median",
+        "server_p99_ms",
+        "qdrant_collection_config_optimizer_max_optimization_threads",
+        "qdrant_collection_config_hnsw_max_indexing_threads",
+        "qdrant_collection_config_optimizer_default_segment_number",
+        "qdrant_collection_config_optimizer_max_segment_size",
+        "qdrant_collection_config_optimizer_indexing_threshold",
+        "optimizer_cpu_budget",
+        "async_scorer",
+        "parallel",
+        "threads",
+        "hnsw_ef",
+        "client_cpu_%_median",
+        "client_cpu_%_max",
+        "client_ram_%_median",
+        "client_ram_%_max",
+        "client_in_%_median",
+        "client_in_%_max",
+        "client_out_%_median",
+        "client_out_%_max",
+        "server_ram_%_median",
+        "server_ram_%_max",
+        "server_disk_%_median",
+        "server_disk_%_max",
+        "server_cpu_%_median",
+        "server_cpu_%_max",
+    ]
+    if 'qdrant_collection_config_optimizer_max_segment_size' not in stats_df_merged.columns:
+        # weirdly, if max segment size is none, it doesnt show up in prometeus logs
+        # so we need to add it manually
+        stats_df_merged['qdrant_collection_config_optimizer_max_segment_size'] = None
     result_df = stats_df_merged[columns_to_save]
     result_df.to_csv(os.path.join(BASE_OUTPUT_DIR, f"benchmark_summary_hardware.csv"), index=False)
     result_df_list.append(result_df)
 
 result_df_list = pd.concat(result_df_list)
-# columns_to_save = ['filepath','rps_median','server_p99_ms','qdrant_collection_config_hnsw_max_indexing_threads','max_indexing_threads','qdrant_collection_config_optimizer_default_segment_number','default_segment_number','qdrant_collection_config_optimizer_indexing_threshold','indexing_threshold','qdrant_collection_config_optimizer_max_optimization_threads','max_optimization_threads','qdrant_collection_config_optimizer_max_segment_size','max_segment_size','optimizer_cpu_budget','async_scorer','parallel','threads','hnsw_ef','client_cpu_%_median','client_cpu_%_max','client_ram_%_median','client_ram_%_max','client_in_%_median','client_in_%_max','client_out_%_median','client_out_%_max','server_ram_%_median','server_ram_%_max','server_disk_%_median','server_disk_%_max','server_cpu_%_median','server_cpu_%_max']
-columns_to_save = ['filepath', 'rps_median', 'server_p99_ms', 'qdrant_collection_config_optimizer_max_optimization_threads', 'max_optimization_threads', 'qdrant_collection_config_hnsw_max_indexing_threads', 'max_indexing_threads', 'qdrant_collection_config_optimizer_default_segment_number', 'default_segment_number', 'qdrant_collection_config_optimizer_max_segment_size', 'max_segment_size', 'qdrant_collection_config_optimizer_indexing_threshold', 'indexing_threshold', 'optimizer_cpu_budget', 'async_scorer', 'parallel', 'threads', 'hnsw_ef', 'client_cpu_%_median', 'client_cpu_%_max', 'client_ram_%_median', 'client_ram_%_max', 'client_in_%_median', 'client_in_%_max', 'client_out_%_median', 'client_out_%_max', 'server_ram_%_median', 'server_ram_%_max', 'server_disk_%_median', 'server_disk_%_max', 'server_cpu_%_median', 'server_cpu_%_max']
 result_df_list[columns_to_save].to_csv(f"{COLLECTION_NAME}_summary_hardware.csv", index=False)

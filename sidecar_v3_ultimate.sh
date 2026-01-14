@@ -55,11 +55,11 @@ while true; do
     # ======================================================
     if ((ITERATION % 5 == 0)); then
         # Save Qdrant Metrics
-        curl -s -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/metrics" \
+        curl -sS -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/metrics" \
             >"$BASE_OUTPUT_DIR/raw_metrics/metrics_${TS_FILE}.txt"
 
         # Save System Metrics
-        curl -s -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/sys_metrics" \
+        curl -sS -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/sys_metrics" \
             >"$BASE_OUTPUT_DIR/raw_sys_metrics/sys_metrics_${TS_FILE}.txt"
     fi
 
@@ -67,7 +67,7 @@ while true; do
     # 3. TELEMETRY - Runs EVERY 30 SECONDS
     # ======================================================
     if ((ITERATION % 30 == 0)); then
-        curl -s -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/telemetry_cluster?details_level=10" \
+        curl -v -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/telemetry?details_level=10" \
             >"$BASE_OUTPUT_DIR/telemetry/telemetry_${TS_FILE}.json"
 
         echo "[$TS_PRINT] Snapshot Saved | Client CPU: $CLIENT_CPU%"

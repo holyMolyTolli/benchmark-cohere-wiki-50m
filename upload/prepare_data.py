@@ -87,6 +87,7 @@ def read_data(datasets: list[str], skip_first: int = 0, limit: int = LIMIT_POINT
 
             yield models.PointStruct(id=global_idx, vector=embedding.tolist()[:VECTOR_SIZE], payload=item)
 
+
 def load_all():
     client = QdrantClient(url=QDRANT_CLUSTER_URL, api_key=QDRANT_API_KEY, prefer_grpc=True, timeout=36000)  # For full-scan search
 
