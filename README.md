@@ -54,7 +54,7 @@ The script initializes the collection with `indexing_threshold: 0` for maximum u
 
 ```python
 client.update_collection(
-    collection_name="benchmark",
+    collection_name=f"${COLLECTION_NAME}",
     optimizer_config=models.OptimizersConfigDiff(indexing_threshold=20000),
     hnsw_config=models.HnswConfigDiff(m=32, ef_construct=128)
 )

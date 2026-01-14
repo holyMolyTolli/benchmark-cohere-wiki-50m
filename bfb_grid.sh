@@ -7,32 +7,30 @@ source .venv/bin/activate
 # --- CONFIGURATION ---
 RAW_DATA_DIR="${BASE_OUTPUT_DIR}/raw_benchmark_data"
 TEMP_JSON="tmp_res.json"
-COLLECTION_NAME="benchmark"
-CLUSTER_ID="cd380b7e-3650-4152-81ee-424a96bece8b"
-ACCOUNT_ID="43cd8aa3-da1d-4a2f-b3c7-94547529da85"
+
 # --- GRID ---
 MAX_OPTIMIZATION_THREADS_LIST=(\"auto\" 2) # \"auto\" 0 1 2 4
 # If null - have no limit and choose dynamically to saturate CPU.
 # If 0 - no optimization threads, optimizations will be disabled.
 
-MAX_INDEXING_THREADS_LIST=(0 2 4) # 0 1 2 4 8
+MAX_INDEXING_THREADS_LIST=(0 4) # 0 1 2 4 8
 # If 0 - automatically select.
 
-DEFAULT_SEGMENT_NUMBER_LIST=(0 1 2) #  0 1 2 100 200 300
+DEFAULT_SEGMENT_NUMBER_LIST=(0) #  0 1 2 100 200 300
 # If `default_segment_number = 0`, will be automatically selected by the number of available CPUs
 
-MAX_SEGMENT_SIZE_LIST=(150000 200000 250000) # **null????** 20000 200000 2000000
+MAX_SEGMENT_SIZE_LIST=("null") # **null????** 20000 150000 200000 2000000
 # If not set, will be automatically selected considering the number of available CPUs.
 
 INDEXING_THRESHOLD_LIST=(20000) # 0 2000 20000 200000
 # To explicitly disable vector indexing, set to `0`.
 
-OPTIMIZER_CPU_BUDGET_LIST=(0 4 8 12 -4)
+OPTIMIZER_CPU_BUDGET_LIST=(0 1 2 4 8)
 # If 0 - auto selection, keep 1 or more CPUs unallocated depending on CPU size
 # If negative - subtract this number of CPUs from the available CPUs.
 # If positive - use this exact number of CPUs.
 
-ASYNC_SCORER_LIST=(false true)
+ASYNC_SCORER_LIST=(false)
 # AsyncScorer enables io_uring when rescoring
 
 PARALLEL_LIST=(8)
@@ -66,7 +64,7 @@ trap cleanup SIGINT SIGTERM EXIT
 wait_for_green() {
     echo -n "   Waiting for collection Green status..."
     while true; do
-        STATUS=$(curl -s -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" -H "api-key: ${QDRANT_API_KEY}" | jq -r '.result.status')
+        STATUS=$(curl -sS -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" -H "api-key: ${QDRANT_API_KEY}" | jq -r '.result.status')
         if [ "$STATUS" == "green" ]; then
             echo " OK."
             return 0
@@ -76,7 +74,7 @@ wait_for_green() {
 }
 
 get_point_count() {
-    curl -s -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
+    curl -sS -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
         -H "api-key: ${QDRANT_API_KEY}" | jq -r '.result.points_count'
 }
 
@@ -87,7 +85,7 @@ wait_for_cluster_ready() {
     while true; do
         # 1. Check Cloud API Status
         # Correct URL: /api/cluster/v1/accounts/{acc}/clusters/{id}
-        RESPONSE=$(curl -s -X GET "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" -H "Authorization: apikey ${QDRANT_MANAGEMENT_KEY}")
+        RESPONSE=$(curl -sS -X GET "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" -H "Authorization: apikey ${QDRANT_MANAGEMENT_KEY}")
 
         # Parse the nested JSON structure
         # State is inside: .state.phase
@@ -97,7 +95,7 @@ wait_for_cluster_ready() {
         if [ "$PHASE" == "CLUSTER_PHASE_HEALTHY" ]; then
             # 2. Cloud says Healthy, now check if DB Port 6333 is accepting connections
             # We use a simple curl to the collections endpoint to see if Nginx/Qdrant is up
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "api-key: ${QDRANT_API_KEY}" "https://${CLEAN_URL}:6333/collections")
+            HTTP_CODE=$(curl -o /dev/null -w "%{http_code}" -H "api-key: ${QDRANT_API_KEY}" "https://${CLEAN_URL}:6333/collections")
 
             if [ "$HTTP_CODE" == "200" ]; then
                 echo " Ready (Healthy & Reachable)."
@@ -121,37 +119,58 @@ apply_tuning() {
 
     echo ">>> Applying Collection Params (Hot Update)..."
 
-    # Handle "auto" vs integer logic for JSON
-    if [ "$max_optimization_threads" == "auto" ] || [ "$max_optimization_threads" == "\"auto\"" ]; then
-        JSON_OPT_THREADS="null"
-    else
-        JSON_OPT_THREADS=$max_optimization_threads
-    fi
+    # # Handle "auto" vs integer logic for JSON
+    # if [ "$max_optimization_threads" == "auto" ] || [ "$max_optimization_threads" == "\"auto\"" ]; then
+    #     JSON_OPT_THREADS="null"
+    # else
+    #     JSON_OPT_THREADS=$max_optimization_threads
+    # fi
 
-    # 1. Apply Collection Level Settings (Instant, hits Port 6333)
-    curl -s -X PATCH "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
-        -H "api-key: ${QDRANT_API_KEY}" \
-        -H "Content-Type: application/json" \
-        --data-raw "{
-        \"optimizers_config\": {
-            \"max_optimization_threads\": $JSON_OPT_THREADS,
-            \"max_segment_size\": $max_segment_size,
-            \"default_segment_number\": $default_segment_number,
-            \"indexing_threshold\": $indexing_threshold
-        },
-        \"hnsw_config\": {
-            \"max_indexing_threads\": $max_indexing_threads
-        }
-    }"
+    raw_request="{
+            \"optimizers_config\": {
+                \"max_optimization_threads\": $max_optimization_threads,
+                \"max_segment_size\": $max_segment_size,
+                \"default_segment_number\": $default_segment_number,
+                \"indexing_threshold\": $indexing_threshold
+            },
+            \"hnsw_config\": {
+                \"max_indexing_threads\": $max_indexing_threads
+            }
+        }"
+
+
+    # retry 3 times
+    for i in {1..3}; do
+        # 1. Apply Collection Level Settings (Instant, hits Port 6333)
+        RETURN_COLLECTION_UPDATE=$(curl -sS -X PATCH "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
+                -H "api-key: ${QDRANT_API_KEY}" \
+                -H "Content-Type: application/json" \
+                --data-raw "$raw_request"
+        )
+        # handle errors like {"status":{"error":"Format error in JSON body: invalid type: string \"auto\", expected usize at line 4 column 42"},"time":0.0}
+        if echo "$RETURN_COLLECTION_UPDATE" | grep -q "\"error\""; then
+            echo "ERROR: Failed to apply collection update. Response: $RETURN_COLLECTION_UPDATE. Raw request: $raw_request"
+            exit 1
+        fi
+
+        # if success, break
+        if [ "$RETURN_COLLECTION_UPDATE" == "200" ]; then
+            break
+        fi
+    done
+
+    # handle errors like {"status":{"error":"Format error in JSON body: invalid type: string \"auto\", expected usize at line 4 column 42"},"time":0.0}
+    if echo "$RETURN_COLLECTION_UPDATE" | grep -q "\"error\""; then
+        exit 1
+    fi
 
     echo ""
     echo ">>> Applying Cluster Params (Requires Cloud API + Rolling Update)..."
 
-    # 2. GET Current Cluster State
-    CURRENT_STATE=$(curl -s -X GET "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" \
+
+    CURRENT_STATE=$(curl -sS -X GET "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" \
         -H "Authorization: apikey ${QDRANT_MANAGEMENT_KEY}")
 
-    # 3. Validation
     if [[ -z "$CURRENT_STATE" ]] || [[ "$CURRENT_STATE" == *"Not Found"* ]]; then
         echo "CRITICAL ERROR: Failed to fetch Cluster State. Check Account/Cluster ID."
         exit 1
@@ -172,7 +191,7 @@ apply_tuning() {
     ')
 
     # 5. PUT Update
-    UPDATE_RES=$(curl -s -X PUT "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" \
+    UPDATE_RES=$(curl -sS -X PUT "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" \
             -H "Authorization: apikey ${QDRANT_MANAGEMENT_KEY}" \
             -H "Content-Type: application/json" \
         -d "$NEW_PAYLOAD")
@@ -190,7 +209,7 @@ apply_tuning() {
     wait_for_cluster_ready
 
     # 2. GET Current Cluster State
-    CURRENT_STATE=$(curl -s -X GET "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" \
+    CURRENT_STATE=$(curl -sS -X GET "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" \
         -H "Authorization: apikey ${QDRANT_MANAGEMENT_KEY}")
 
     # check optimizerCpuBudget
@@ -215,7 +234,7 @@ apply_tuning() {
 
     # 4. Verify Collection Settings Only
     # (We cannot verify Cluster settings via /collections endpoint, so I removed those checks)
-    COLLECTION_INFO=$(curl -s -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
+    COLLECTION_INFO=$(curl -sS -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
         -H "api-key: ${QDRANT_API_KEY}")
 
     # check max_optimization_threads
@@ -231,6 +250,11 @@ apply_tuning() {
 
     # check max_segment_size
     MAX_SEGMENT_SIZE=$(echo $COLLECTION_INFO | jq -r '.result.config.optimizer_config.max_segment_size')
+    # if max_segment_size is auto, convert to null
+    if [ "$max_segment_size" == \"auto\" ]; then
+        max_segment_size=null
+    fi
+
     if [ "$MAX_SEGMENT_SIZE" != "$max_segment_size" ]; then
         echo "ERROR: max_segment_size not applied. Expected $max_segment_size, got $MAX_SEGMENT_SIZE"
         exit 1
@@ -277,13 +301,13 @@ sleep 2
 # wait_for_green
 
 # --- MAIN LOOP ---
-for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
-    for default_segment_number in "${DEFAULT_SEGMENT_NUMBER_LIST[@]}"; do
-        for max_optimization_threads in "${MAX_OPTIMIZATION_THREADS_LIST[@]}"; do
-            for max_indexing_threads in "${MAX_INDEXING_THREADS_LIST[@]}"; do
-                for indexing_threshold in "${INDEXING_THRESHOLD_LIST[@]}"; do
-                    for optimizer_cpu_budget in "${OPTIMIZER_CPU_BUDGET_LIST[@]}"; do
-                        for async_scorer in "${ASYNC_SCORER_LIST[@]}"; do
+for optimizer_cpu_budget in "${OPTIMIZER_CPU_BUDGET_LIST[@]}"; do
+    for async_scorer in "${ASYNC_SCORER_LIST[@]}"; do
+        for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
+            for default_segment_number in "${DEFAULT_SEGMENT_NUMBER_LIST[@]}"; do
+                for max_optimization_threads in "${MAX_OPTIMIZATION_THREADS_LIST[@]}"; do
+                    for max_indexing_threads in "${MAX_INDEXING_THREADS_LIST[@]}"; do
+                        for indexing_threshold in "${INDEXING_THRESHOLD_LIST[@]}"; do
                             echo "----------------------------------------------------------------"
                             echo "NEW CONFIGURATION: max_segment_size=$max_segment_size | default_segment_number=$default_segment_number | max_optimization_threads=$max_optimization_threads | max_indexing_threads=$max_indexing_threads | indexing_threshold=$indexing_threshold | optimizer_cpu_budget=$optimizer_cpu_budget | async_scorer=$async_scorer"
                             echo "----------------------------------------------------------------"
@@ -292,6 +316,14 @@ for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
                             # STEP 1: APPLY TUNING (Server Side)
                             # ---------------------------------------------------------
                             echo "Applying Tuning Parameters..."
+                            # # first value for each parameter in the loop:
+                            # max_segment_size=${MAX_SEGMENT_SIZE_LIST[0]}
+                            # default_segment_number=${DEFAULT_SEGMENT_NUMBER_LIST[0]}
+                            # max_optimization_threads=${MAX_OPTIMIZATION_THREADS_LIST[0]}
+                            # max_indexing_threads=${MAX_INDEXING_THREADS_LIST[0]}
+                            # indexing_threshold=${INDEXING_THRESHOLD_LIST[0]}
+                            # optimizer_cpu_budget=${OPTIMIZER_CPU_BUDGET_LIST[0]}
+                            # async_scorer=${ASYNC_SCORER_LIST[0]}
                             apply_tuning "$max_segment_size" "$default_segment_number" "$max_optimization_threads" "$max_indexing_threads" "$indexing_threshold" "$optimizer_cpu_budget" "$async_scorer"
 
                             # ---------------------------------------------------------
@@ -321,7 +353,8 @@ for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
 
                             # Start in background & save PID
                             wait_for_cluster_ready # otherwise prepare_data fails
-                            python3 upload/prepare_data.py >/dev/null 2>&1 &
+                            # python3 upload/prepare_data.py >/dev/null 2>&1 &
+                            python3 upload/prepare_data.py > ${BASE_OUTPUT_DIR}/write_output.log 2>&1 &
                             BG_PID=$!
 
                             # ---------------------------------------------------------
@@ -349,7 +382,6 @@ for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
                             for P in "${PARALLEL_LIST[@]}"; do
                                 for T in "${THREADS_LIST[@]}"; do
                                     for EF in "${SEARCH_HNSW_EF_LIST[@]}"; do
-
                                         # heuristic: scale vectors based on parallelism, min 5000
                                         NUM_VECTORS=$((P * 150))
                                         if [ "$NUM_VECTORS" -lt 5000 ]; then NUM_VECTORS=5000; fi
@@ -358,6 +390,7 @@ for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
 
                                         # Capture Start Time (Format: YYYYMMDD_HHMMSS)
                                         START_TIME=$(date +%Y%m%d_%H%M%S)
+                                        START_VECTORS=$(get_point_count)
 
                                         # --- RUN DOCKER ---
                                         sudo docker run --rm \
@@ -368,7 +401,7 @@ for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
                                             qdrant/bfb:latest \
                                             ./bfb \
                                             --uri "https://${CLEAN_URL}:6334" \
-                                            --collection-name "benchmark" \
+                                            --collection-name "${COLLECTION_NAME}" \
                                             --dim 768 \
                                             --skip-create \
                                             --skip-upload \
@@ -397,6 +430,7 @@ for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
 
                                         # Capture End Time
                                         END_TIME=$(date +%Y%m%d_%H%M%S)
+                                        END_VECTORS=$(get_point_count)
 
                                         # Process Result
                                         if [ -f "$TEMP_JSON" ]; then
@@ -411,6 +445,10 @@ for max_segment_size in "${MAX_SEGMENT_SIZE_LIST[@]}"; do
                                         else
                                             echo "FAILED. No output generated."
                                         fi
+
+                                        # calculate vectors per second
+                                        VECTORS_PER_SECOND=$(( (END_VECTORS - START_VECTORS) / (END_TIME - START_TIME) ))
+                                        echo "Vectors per second: $VECTORS_PER_SECOND"
 
                                         # Short cooldown to let the server breathe
                                         sleep 10

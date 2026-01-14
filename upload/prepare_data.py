@@ -4,10 +4,11 @@ from typing import Iterable
 import tqdm
 from hf import read_dataset_stream
 from qdrant_client import QdrantClient, models
+import time
 
 QDRANT_CLUSTER_URL = os.getenv("QDRANT_CLUSTER_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-QDRANT_COLLECTION_NAME = "benchmark"
+COLLECTION_NAME = os.getenv("COLLECTION_NAME")
 EXACT_QUERY_COUNT = 0
 LIMIT_POINTS = int(os.getenv("LIMIT_POINTS", 50_000_000))
 INDEXING_THRESHOLD = int(os.getenv("INDEXING_THRESHOLD", 20000))
@@ -16,7 +17,7 @@ DATASETS = ["Cohere/wikipedia-2023-11-embed-multilingual-v3"]
 VECTOR_SIZE = 768
 
 # client.update_collection(
-#     collection_name="benchmark",
+#     collection_name=f"${COLLECTION_NAME}",
 #     optimizer_config=models.OptimizersConfigDiff(
 #         default_segment_number=200  # This sets the value to null
 #     )
@@ -28,13 +29,13 @@ def create_collection(force_recreate=False):
 
     try:
         if force_recreate:
-            client.delete_collection(QDRANT_COLLECTION_NAME)
+            client.delete_collection(COLLECTION_NAME)
 
-        if client.collection_exists(QDRANT_COLLECTION_NAME):
+        if client.collection_exists(COLLECTION_NAME):
             return
 
         client.create_collection(
-            QDRANT_COLLECTION_NAME,
+            COLLECTION_NAME,
             # --> no quantization
             # quantization_config=models.ScalarQuantization(
             #     scalar=models.ScalarQuantizationConfig(
@@ -86,13 +87,12 @@ def read_data(datasets: list[str], skip_first: int = 0, limit: int = LIMIT_POINT
 
             yield models.PointStruct(id=global_idx, vector=embedding.tolist()[:VECTOR_SIZE], payload=item)
 
-
 def load_all():
     client = QdrantClient(url=QDRANT_CLUSTER_URL, api_key=QDRANT_API_KEY, prefer_grpc=True, timeout=36000)  # For full-scan search
 
     try:
         # 1. Check how many points are already in the DB
-        collection_info = client.get_collection(QDRANT_COLLECTION_NAME)
+        collection_info = client.get_collection(COLLECTION_NAME)
         current_count = collection_info.points_count
         print(f"Current points in collection: {current_count:,}")
 
@@ -103,23 +103,26 @@ def load_all():
 
         # 3. Calculate remaining points to reach the limit
         remaining_to_upload = LIMIT_POINTS - current_count
+        start_time = time.time()
+        print(f"Start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}")
 
         if remaining_to_upload < 0:
             print(f"Target limit reached. Deleting points from {LIMIT_POINTS} to {current_count}")
-            client.delete(collection_name=QDRANT_COLLECTION_NAME, points_selector=[i for i in range(LIMIT_POINTS, current_count)], wait=True)
+            client.delete(collection_name=COLLECTION_NAME, points_selector=[i for i in range(LIMIT_POINTS, current_count)], wait=True)
             return
         elif remaining_to_upload == 0:
             print("Target limit reached. Nothing to upload.")
             return
 
         print(f"Resuming from index {skip_first:,}. Remaining: {remaining_to_upload:,}")
+        # compute upload time and points uploaded. print it and also print the points per second.
 
         # 4. Get the data stream starting after the last uploaded point
         points = read_data(DATASETS, skip_first=skip_first, limit=LIMIT_POINTS + EXACT_QUERY_COUNT)
 
         # 5. Upload the points
         client.upload_points(
-            collection_name=QDRANT_COLLECTION_NAME,
+            collection_name=COLLECTION_NAME,
             points=tqdm.tqdm(
                 points,
                 total=remaining_to_upload,
@@ -135,10 +138,18 @@ def load_all():
         )
 
     finally:
+        upload_time = time.time() - start_time
+        new_count = client.get_collection(COLLECTION_NAME).points_count
+        points_uploaded = new_count - current_count
+        points_per_second = points_uploaded / upload_time
+        print(f"Points uploaded: {points_uploaded:,}")
+        print(f"Upload time: {upload_time:.2f} seconds")
+        print(f"Points per second: {points_per_second:,}")
         client.close()
 
 
 def main():
+    # 08:17 start
     create_collection(force_recreate=False)
     load_all()
 
@@ -146,13 +157,13 @@ def main():
         client = QdrantClient(url=QDRANT_CLUSTER_URL, api_key=QDRANT_API_KEY, prefer_grpc=True, timeout=36000)  # For full-scan search
 
         # get collection info
-        collection_info = client.get_collection(QDRANT_COLLECTION_NAME)
+        collection_info = client.get_collection(COLLECTION_NAME)
         print(collection_info.model_dump())
 
         # only used for initial big upload
         # # set indexing_threshold to 20000
         # client.update_collection(
-        #     collection_name=QDRANT_COLLECTION_NAME,
+        #     collection_name=COLLECTION_NAME,
         #     optimizer_config=models.OptimizersConfigDiff(indexing_threshold=INDEXING_THRESHOLD),
         # )
     finally:
