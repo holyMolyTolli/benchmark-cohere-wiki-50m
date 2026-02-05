@@ -293,8 +293,6 @@ apply_tuning() {
     fi
 }
 
-# make a run benchmark funtion
-
 run_benchmark() {
     local P=$1
     local T=$2
