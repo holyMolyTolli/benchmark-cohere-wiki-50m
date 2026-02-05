@@ -86,21 +86,15 @@ get_point_count() {
 
 wait_for_cluster_ready() {
     echo -n "   Waiting for Cloud Rolling Update..."
-    sleep 5 # Give the API a moment to register the PATCH
+    sleep 5
 
     while true; do
         # 1. Check Cloud API Status
-        # Correct URL: /api/cluster/v1/accounts/{acc}/clusters/{id}
         RESPONSE=$(curl -sS -X GET "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" -H "Authorization: apikey ${QDRANT_MANAGEMENT_KEY}")
-
-        # Parse the nested JSON structure
-        # State is inside: .state.phase
         PHASE=$(echo "$RESPONSE" | jq -r '.cluster.state.phase')
 
-        # We look for "CLUSTER_PHASE_HEALTHY"
         if [ "$PHASE" == "CLUSTER_PHASE_HEALTHY" ]; then
             # 2. Cloud says Healthy, now check if DB Port 6333 is accepting connections
-            # We use a simple curl to the collections endpoint to see if Nginx/Qdrant is up
             HTTP_CODE=$(curl -o /dev/null -w "%{http_code}" -H "api-key: ${QDRANT_API_KEY}" "https://${CLEAN_URL}:6333/collections")
 
             if [ "$HTTP_CODE" == "200" ]; then
@@ -164,7 +158,6 @@ apply_tuning() {
                 sleep 10
             fi
         else
-            # --- 3. SUCCESS (No "error" in JSON) ---
             echo "OK."
             break
         fi
@@ -201,13 +194,13 @@ apply_tuning() {
         | del(.cluster.configuration.lastModifiedAt)
     ')
 
-    # 5. PUT Update
+    # 1. PUT Update
     UPDATE_RES=$(curl -sS -X PUT "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" \
             -H "Authorization: apikey ${QDRANT_MANAGEMENT_KEY}" \
             -H "Content-Type: application/json" \
         -d "$NEW_PAYLOAD")
 
-    # Check for immediate failure
+    # 2. Check for immediate failure
     if echo "$UPDATE_RES" | grep -q "\"code\":"; then
         CODE=$(echo "$UPDATE_RES" | jq -r '.code')
         if [ "$CODE" != "null" ] && [ "$CODE" != "0" ]; then
@@ -219,12 +212,11 @@ apply_tuning() {
     # 3. Wait for the rolling update to finish
     wait_for_cluster_ready
 
-    # 2. GET Current Cluster State
+    # 4. GET Current Cluster State
     CURRENT_STATE=$(curl -sS -X GET "https://api.cloud.qdrant.io/api/cluster/v1/accounts/${ACCOUNT_ID}/clusters/${CLUSTER_ID}" \
         -H "Authorization: apikey ${QDRANT_MANAGEMENT_KEY}")
 
-    # check optimizerCpuBudget
-    # --- SAFETY FIX: Normalize null to 0 ---
+    # 4. check optimizerCpuBudget
     OPTIMIZER_CPU_BUDGET=$(echo $CURRENT_STATE | jq -r '.cluster.configuration.databaseConfiguration.storage.performance.optimizerCpuBudget')
     if [ "$OPTIMIZER_CPU_BUDGET" == "null" ]; then OPTIMIZER_CPU_BUDGET=0; fi
 
@@ -233,7 +225,7 @@ apply_tuning() {
         exit 1
     fi
 
-    # check asyncScorer
+    # 5. check asyncScorer
     ASYNC_SCORER=$(echo $CURRENT_STATE | jq -r '.cluster.configuration.databaseConfiguration.storage.performance.asyncScorer')
     if [ "$ASYNC_SCORER" == "null" ]; then ASYNC_SCORER=false; fi
 
@@ -243,12 +235,12 @@ apply_tuning() {
         exit 1
     fi
 
-    # 4. Verify Collection Settings Only
+    # 6. Verify Collection Settings Only
     # (We cannot verify Cluster settings via /collections endpoint, so I removed those checks)
     COLLECTION_INFO=$(curl -sS -X GET "https://${CLEAN_URL}:6333/collections/${COLLECTION_NAME}" \
         -H "api-key: ${QDRANT_API_KEY}")
 
-    # check max_optimization_threads
+    # 7. check max_optimization_threads
     MAX_OPTIMIZATION_THREADS=$(echo $COLLECTION_INFO | jq -r '.result.config.optimizer_config.max_optimization_threads')
     # if max_optimization_threads is auto, convert to null
     if [ "$max_optimization_threads" == \"auto\" ]; then
@@ -259,7 +251,7 @@ apply_tuning() {
         exit 1
     fi
 
-    # check max_segment_size
+    # 8. check max_segment_size
     MAX_SEGMENT_SIZE=$(echo $COLLECTION_INFO | jq -r '.result.config.optimizer_config.max_segment_size')
     # if max_segment_size is auto, convert to null
     if [ "$max_segment_size" == \"auto\" ]; then
@@ -271,21 +263,21 @@ apply_tuning() {
         exit 1
     fi
 
-    # check default_segment_number
+    # 9. check default_segment_number
     DEFAULT_SEGMENT_NUMBER=$(echo $COLLECTION_INFO | jq -r '.result.config.optimizer_config.default_segment_number')
     if [ "$DEFAULT_SEGMENT_NUMBER" != "$default_segment_number" ]; then
         echo "ERROR: default_segment_number not applied. Expected $default_segment_number, got $DEFAULT_SEGMENT_NUMBER"
         exit 1
     fi
 
-    # check indexing_threshold
+    # 10. check indexing_threshold
     INDEXING_THRESHOLD=$(echo $COLLECTION_INFO | jq -r '.result.config.optimizer_config.indexing_threshold')
     if [ "$INDEXING_THRESHOLD" != "$indexing_threshold" ]; then
         echo "ERROR: indexing_threshold not applied. Expected $indexing_threshold, got $INDEXING_THRESHOLD"
         exit 1
     fi
 
-    # check max_indexing_threads
+    # 11. check max_indexing_threads
     MAX_INDEXING_THREADS=$(echo $COLLECTION_INFO | jq -r '.result.config.hnsw_config.max_indexing_threads')
     if [ "$MAX_INDEXING_THREADS" != "$max_indexing_threads" ]; then
         echo "ERROR: max_indexing_threads not applied. Expected $max_indexing_threads, got $MAX_INDEXING_THREADS"
@@ -369,18 +361,16 @@ run_benchmark() {
         echo "FAILED. No output generated."
     fi
 
-    # # calculate vectors per second
+    # calculate vectors per second
     DURATION=$((END_EPOCH - START_EPOCH))
     if [ "$DURATION" -le 0 ]; then DURATION=1; fi # Safety check: prevent division by zero if benchmark runs instantly
     VECTORS_PER_SECOND=$(( (END_VECTORS - START_VECTORS) / DURATION ))
 
     echo "Vectors per second: $VECTORS_PER_SECOND"
 
-    # 1. FIX: Just define the filename here, don't include the directory path yet.
-    # 2. FIX: Don't add .json again, $FILENAME already has it.
     META_FILENAME="metadata_${FILENAME}"
 
-    # Use jq to build a proper JSON object
+    # build a JSON object
     jq -n \
         --argjson cluster "$CLUSTER_CONFIGURATION" \
         --argjson collection "$COLLECTION_INFO" \
