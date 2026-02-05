@@ -36,19 +36,27 @@ def create_collection(force_recreate=False):
 
         client.create_collection(
             COLLECTION_NAME,
-            # --> no quantization
+            # --> no quantization --> YES quantization !!!
             # quantization_config=models.ScalarQuantization(
             #     scalar=models.ScalarQuantizationConfig(
             #         type=models.ScalarType.INT8,
-            #         always_ram=True,
-            #         quantile=0.99,
-            #     )
+            #         quantile=0.99,  # Optional: helps handle outliers for better accuracy
+            #         always_ram=True,  # Forces quantized vectors to stay in memory
+            #     ),
             # ),
+            quantization_config=models.ScalarQuantization(
+                scalar=models.ScalarQuantizationConfig(
+                    type=models.ScalarType.INT8,  # Achieves the 4x compression
+                    always_ram=True,              # Keeps quantized vectors in memory
+                    quantile=0.99                 # Recommended to handle outliers
+                ),
+            ),
             # --> leave hnsw_config at default values
             # hnsw_config=models.HnswConfigDiff(
             #     m=0,
             #     ef_construct=256,
             # ),
+            # scalar in memory + rescoring with full resolution off disk. !!!
             vectors_config=models.VectorParams(
                 size=VECTOR_SIZE,
                 distance=models.Distance.COSINE,
@@ -150,9 +158,11 @@ def load_all():
 
 
 def main():
-    # 08:17 start
     create_collection(force_recreate=False)
+    start_time = time.time()
     load_all()
+    end_time = time.time()
+    print(f"Time taken to load all: {end_time - start_time:.2f} seconds")
 
     try:
         client = QdrantClient(url=QDRANT_CLUSTER_URL, api_key=QDRANT_API_KEY, prefer_grpc=True, timeout=36000)  # For full-scan search
@@ -161,12 +171,21 @@ def main():
         collection_info = client.get_collection(COLLECTION_NAME)
         print(collection_info.model_dump())
 
-        # only used for initial big upload
-        # # set indexing_threshold to 20000
-        # client.update_collection(
-        #     collection_name=COLLECTION_NAME,
-        #     optimizer_config=models.OptimizersConfigDiff(indexing_threshold=INDEXING_THRESHOLD),
-        # )
+        # set indexing_threshold from 0 to X
+        start_time = time.time()
+        client.update_collection(
+            collection_name=COLLECTION_NAME,
+            optimizer_config=models.OptimizersConfigDiff(indexing_threshold=INDEXING_THRESHOLD),
+        )
+        # loop till collection status is green
+        print("Waiting for collection status to be green...")
+        while True:
+            collection_info = client.get_collection(COLLECTION_NAME)
+            if collection_info.status == "green":
+                break
+            time.sleep(1)
+        end_time = time.time()
+        print(f"Time taken to update collection: {end_time - start_time:.2f} seconds")
     finally:
         client.close()
 

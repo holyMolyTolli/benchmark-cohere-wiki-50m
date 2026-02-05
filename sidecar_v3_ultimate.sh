@@ -67,7 +67,7 @@ while true; do
     # 3. TELEMETRY - Runs EVERY 30 SECONDS
     # ======================================================
     if ((ITERATION % 30 == 0)); then
-        curl -v -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/telemetry?details_level=10" \
+        curl -sS -H "Authorization: Bearer $QDRANT_API_KEY" "${BASE_URL}/telemetry?details_level=10" \
             >"$BASE_OUTPUT_DIR/telemetry/telemetry_${TS_FILE}.json"
 
         echo "[$TS_PRINT] Snapshot Saved | Client CPU: $CLIENT_CPU%"

@@ -227,17 +227,39 @@ PARAM_PATTERNS = {"max_optimization_threads": r'_Opt("auto"|\d+)_', "max_indexin
 DEFAULT_VALUES = {"max_optimization_threads": "auto", "max_indexing_threads": 0, "max_segment_size": "auto", "default_segment_number": 0, "indexing_threshold": 10000, "optimizer_cpu_budget": "auto", "async_scorer": "false", "parallel": "N/A", "threads": "N/A", "hnsw_ef": "N/A"}
 
 result_df_list = []
-for run in range(1, 2):
+for run in range(0, 20):
     # print(f"Processing run {run:02d}")
     # BASE_OUTPUT_DIR = f"{COLLECTION_NAME}_results_rw_{run:02d}"
     BASE_OUTPUT_DIR = os.getenv("BASE_OUTPUT_DIR")
     BENCHMARK_FOLDER = f"{BASE_OUTPUT_DIR}/raw_benchmark_data"
 
     # get benchmark data
+    # if folder exists, get the files from the folder else skip the run
+    if not os.path.exists(BENCHMARK_FOLDER):
+        print(f"Benchmark folder {BENCHMARK_FOLDER} does not exist. Skipping run {run:02d}")
+        continue
     file_list = glob.glob(os.path.join(BENCHMARK_FOLDER, "*.json"))
     benchmark_metrics = compute_benchmark_metrics(file_list)
     benchmark_df = pd.DataFrame(benchmark_metrics)
     benchmark_df = benchmark_df.sort_values(by=["parallel", "hnsw_ef", "threads", "max_optimization_threads", "max_indexing_threads", "max_segment_size", "default_segment_number", "indexing_threshold"])
+
+
+    #                                                'run_no_writes_Opt"auto"_Idx0_Segnull_SegNum0_IndTh20000_P8_T2_EF32_OptimizerCpuBudget8_AsyncScorerfalse_start20260114_172520_end20260114_172529.json'
+    # 'benchmark_v02_results_rw_02/raw_benchmark_data/run_concurrent_writes_Opt"auto"_Idx0_Segnull_SegNum0_IndTh20000_P8_T2_EF32_OptimizerCpuBudget0_AsyncScorerfalse_start20260114_162140_end20260114_162227.json'
+    # 'benchmark_v02_results_rw_02/raw_benchmark_data/run_concurrent_writes_Opt"auto"_Idx0_Segnull_SegNum0_IndTh20000_P8_T2_EF32_OptimizerCpuBudget0_AsyncScorerfalse_start20260114_162140_end20260114_162227.json'
+
+    # get metadata data
+    metadata_files = sorted(glob.glob(os.path.join(BASE_OUTPUT_DIR, "raw_benchmark_metadata", "*.json")))
+    metadata_data = []
+    for filepath in metadata_files:
+        with open(filepath, "r") as f:
+            data = json.load(f)
+        metadata_data.append({
+            "filepath": BASE_OUTPUT_DIR + "/raw_benchmark_data/" + data["benchmark_run_file"],
+            "writes_per_second": data["derived_metrics"]["vectors_per_second"]
+        })
+    metadata_df = pd.DataFrame(metadata_data)
+
 
     # get prometheus data
     sys_files = sorted(glob.glob(os.path.join(BASE_OUTPUT_DIR, "raw_sys_metrics", "*.txt")))
@@ -262,6 +284,8 @@ for run in range(1, 2):
     cpu_limit_standard_cores = raw_limit_nanocores / 1e9
     prometheus_df["server_cpu_%"] = np.where(cpu_limit_standard_cores > 0, (cpu_rate_cores / cpu_limit_standard_cores) * 100, 0.0)
 
+
+
     # get client stats data
     client_stats_df = pd.read_csv(os.path.join(BASE_OUTPUT_DIR, "client_stats.csv"))
     client_stats_df["timestamp"] = pd.to_datetime(client_stats_df["timestamp"])
@@ -276,6 +300,9 @@ for run in range(1, 2):
     client_stats_df["client_in_%"] = (client_stats_df["bps_in"] / INSTANCE_MAX_BPS) * 100
     client_stats_df["client_out_%"] = (client_stats_df["bps_out"] / INSTANCE_MAX_BPS) * 100
 
+
+
+
     # --- AGGREGATION ---
     # combine time series data
     stats_df = prometheus_df.merge(client_stats_df, on="timestamp", how="outer")
@@ -289,7 +316,7 @@ for run in range(1, 2):
     prometheus_parameter_columns = [param for param in stats_df.columns if param.startswith("qdrant_collection_") and any(param.endswith(p) for p in PARAM_PATTERNS.keys())]
     prometheus_parameter_df = stats_df.dropna(subset="app_info_0")[["filepath"] + prometheus_parameter_columns].drop_duplicates()
 
-    stats_df_merged = final_stats.merge(benchmark_df, on="filepath", how="outer").merge(prometheus_parameter_df, on="filepath", how="outer")
+    stats_df_merged = final_stats.merge(benchmark_df, on="filepath", how="outer").merge(prometheus_parameter_df, on="filepath", how="outer").merge(metadata_df, on="filepath", how="outer")
 
     # Save
     # base_columns = ["filepath", "rps_median", "server_p99_ms"]
@@ -300,6 +327,7 @@ for run in range(1, 2):
         "filepath",
         "rps_median",
         "server_p99_ms",
+        "writes_per_second",
         "qdrant_collection_config_optimizer_max_optimization_threads",
         "qdrant_collection_config_hnsw_max_indexing_threads",
         "qdrant_collection_config_optimizer_default_segment_number",
@@ -329,6 +357,10 @@ for run in range(1, 2):
         # weirdly, if max segment size is none, it doesnt show up in prometeus logs
         # so we need to add it manually
         stats_df_merged['qdrant_collection_config_optimizer_max_segment_size'] = None
+    if "qdrant_collection_config_optimizer_max_optimization_threads" not in stats_df_merged.columns:
+        # weirdly, if max optimization threads is none, it doesnt show up in prometeus logs
+        # so we need to add it manually
+        stats_df_merged['qdrant_collection_config_optimizer_max_optimization_threads'] = None
     result_df = stats_df_merged[columns_to_save]
     result_df.to_csv(os.path.join(BASE_OUTPUT_DIR, f"benchmark_summary_hardware.csv"), index=False)
     result_df_list.append(result_df)
