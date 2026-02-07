@@ -45,11 +45,7 @@ def create_collection(force_recreate=False):
             #     ),
             # ),
             quantization_config=models.ScalarQuantization(
-                scalar=models.ScalarQuantizationConfig(
-                    type=models.ScalarType.INT8,  # Achieves the 4x compression
-                    always_ram=True,              # Keeps quantized vectors in memory
-                    quantile=0.99                 # Recommended to handle outliers
-                ),
+                scalar=models.ScalarQuantizationConfig(type=models.ScalarType.INT8, always_ram=True, quantile=0.99),  # Achieves the 4x compression  # Keeps quantized vectors in memory  # Recommended to handle outliers
             ),
             # --> leave hnsw_config at default values
             # hnsw_config=models.HnswConfigDiff(

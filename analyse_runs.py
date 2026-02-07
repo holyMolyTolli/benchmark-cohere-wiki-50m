@@ -14,6 +14,7 @@ import pandas as pd
 
 def parse_prometheus_data(filepath):
     metrics = {}
+    metrics_list = []
 
     pattern = re.compile(r"^([a-zA-Z0-9_]+)(?:\{(.*)\})?\s+(.+)$")
 
@@ -28,7 +29,7 @@ def parse_prometheus_data(filepath):
 
         match = pattern.match(line)
         if match:
-            name = match.group(1)
+            key_name = match.group(1)
             label_str = match.group(2)
             value_str = match.group(3)
 
@@ -40,19 +41,58 @@ def parse_prometheus_data(filepath):
                 pairs = re.findall(r'([a-zA-Z0-9_]+)="([^"]*)"', label_str)
                 labels = {k: v for k, v in pairs}
 
-            try:
-                # Handle "Inf" and standard floats
-                if "Inf" in value_str:
-                    val = float("inf")
-                else:
-                    val = float(value_str)
-            except ValueError:
+            # Handle "Inf" and standard floats
+            if "Inf" in value_str:
+                val = float("inf")
+            else:
+                val = float(value_str)
+
+            if "resource" in labels:
+                key_name = key_name + "_" + labels["resource"] + "_" + labels["unit"]
+            if "device" in labels:
+                key_name = key_name + labels["device"].replace("/", "_")
+            if key_name == "qdrant_operator_cluster_phase" and val != 1:
                 continue
 
-            if name not in metrics:
-                metrics[name] = []
+            if key_name not in metrics:
+                metrics[key_name] = []
 
-            metrics[name].append({"labels": labels, "value": val})
+            metrics[key_name].append({"labels": labels, "value": val})
+            metrics_list.append({"key_name": key_name, "value": val, **labels})
+
+    df = pd.DataFrame(metrics_list)
+    for length in range(0, 500):
+        for column in df.columns:
+            # if df[column].nunique() == length:
+            if df[column].count() == length:
+                print(f"{column} ({df[column].nunique()} + {df[column].count()}): {" | ".join(sorted(df[column].unique().astype(str)))}")
+    for column in df.columns:
+        # if df[column].nunique() > length:
+        if df[column].count() > length:
+            print(f"{column} ({df[column].nunique()} + {df[column].count()}): {" | ".join(sorted(df[column].unique().astype(str)))}")
+
+    # # sort metrics by key
+    # count_8 = []
+    # count_9 = []
+    # count_12 = []
+    # count_15 = []
+    # for length in range(0, 500):
+    #     for k,v in sorted(metrics.items()):
+    #         if len(v) == length:
+    #             print(f"{k}: {len(v)}")
+    #             if length == 8:
+    #                 count_8.append(k)
+    #             elif length == 9:
+    #                 count_9.append(k)
+    #             elif length == 12:
+    #                 count_12.append(k)
+    #             elif length == 15:
+    #                 count_15.append(k)
+
+    # df[df.key_name.isin(count_8)]
+    # df[df.key_name.isin(count_9)]
+    # df[df.key_name.isin(count_12)]
+    # df[df.key_name.isin(count_15)]
 
     # ----------------------
     # Define prefixes for configuration parameters that should be uniform
@@ -65,50 +105,36 @@ def parse_prometheus_data(filepath):
 
     cleaned_metrics = {}
     for key, value in metrics.items():
-        value_sum = 0
-        for item in value:
-            pod = item["labels"].get("pod")
-            persistentvolumeclaim = item["labels"].get("persistentvolumeclaim")
-            if pod:
-                use = pod
-            elif persistentvolumeclaim:
-                use = persistentvolumeclaim
+        if len(value) == metrics["qdrant_operator_cluster_status_nodes"][0]["value"]:
+            value_sum = 0
+            for item in value:
+                pod = item["labels"].get("pod")
+                persistentvolumeclaim = item["labels"].get("persistentvolumeclaim")
+                if pod:
+                    use = pod
+                elif persistentvolumeclaim:
+                    use = persistentvolumeclaim
+                else:
+                    print(f"No pod or persistentvolumeclaim found for {key}")
+                    continue
+                pod_id = use.split("-")[-1]
+                new_key = key + "_" + str(pod_id)
+                cleaned_metrics[new_key] = item["value"]
+                value_sum += item["value"]
+
+            # Check if the key matches config prefixes or explicit average keys
+            should_average = key.startswith(config_prefixes) or key in keys_to_average_explicit
+
+            if should_average:
+                # Average: for configs, rates, and logical counts
+                cleaned_metrics[key] = value_sum / SERVER_NODE_COUNT
             else:
-                print(f"No pod or persistentvolumeclaim found for {key}")
-                continue
-            pod_id = use.split("-")[-1]
-            new_key = key + "_" + str(pod_id)
-            cleaned_metrics[new_key] = item["value"]
-            value_sum += item["value"]
-
-        # Check if the key matches config prefixes or explicit average keys
-        should_average = key.startswith(config_prefixes) or key in keys_to_average_explicit
-
-        if should_average:
-            # Average: for configs, rates, and logical counts
-            cleaned_metrics[key] = value_sum / SERVER_NODE_COUNT
-        else:
-            # Default to SUM: for counters, capacities, bytes, CPU seconds, and histogram buckets
-            cleaned_metrics[key] = value_sum
+                # Default to SUM: for counters, capacities, bytes, CPU seconds, and histogram buckets
+                cleaned_metrics[key] = value_sum
+        elif len(value) == 1:
+            cleaned_metrics[key] = value[0]["value"]
 
     return cleaned_metrics
-
-
-def parse_telemetry_latest(folder_path):
-    files = sorted(glob.glob(os.path.join(folder_path, "telemetry", "*.json")))
-
-    total_vectors = 0
-    for f in files:
-        with open(f, "r") as f:
-            data = json.load(f)
-            shards = data["result"]["collections"]["collections"][0]["shards"]
-            for shard in shards:
-                try:
-                    total_vectors += shard["local"]["num_vectors"]
-                except:
-                    continue
-
-    return total_vectors
 
 
 def compute_benchmark_metrics(file_list):
@@ -228,13 +254,14 @@ DEFAULT_VALUES = {"max_optimization_threads": "auto", "max_indexing_threads": 0,
 
 result_df_list = []
 for run in range(0, 20):
-    # print(f"Processing run {run:02d}")
-    # BASE_OUTPUT_DIR = f"{COLLECTION_NAME}_results_rw_{run:02d}"
-    BASE_OUTPUT_DIR = os.getenv("BASE_OUTPUT_DIR")
+    print(f"Processing run {run:02d}")
+    BASE_OUTPUT_DIR = f"{COLLECTION_NAME}_results_rw_{run:02d}"
+    # BASE_OUTPUT_DIR = os.getenv("BASE_OUTPUT_DIR")
     BENCHMARK_FOLDER = f"{BASE_OUTPUT_DIR}/raw_benchmark_data"
 
-    # get benchmark data
-    # if folder exists, get the files from the folder else skip the run
+    # ------------------------------------------------------------
+    # get bfb benchmark data
+    # ------------------------------------------------------------
     if not os.path.exists(BENCHMARK_FOLDER):
         print(f"Benchmark folder {BENCHMARK_FOLDER} does not exist. Skipping run {run:02d}")
         continue
@@ -243,37 +270,36 @@ for run in range(0, 20):
     benchmark_df = pd.DataFrame(benchmark_metrics)
     benchmark_df = benchmark_df.sort_values(by=["parallel", "hnsw_ef", "threads", "max_optimization_threads", "max_indexing_threads", "max_segment_size", "default_segment_number", "indexing_threshold"])
 
-
-    #                                                'run_no_writes_Opt"auto"_Idx0_Segnull_SegNum0_IndTh20000_P8_T2_EF32_OptimizerCpuBudget8_AsyncScorerfalse_start20260114_172520_end20260114_172529.json'
-    # 'benchmark_v02_results_rw_02/raw_benchmark_data/run_concurrent_writes_Opt"auto"_Idx0_Segnull_SegNum0_IndTh20000_P8_T2_EF32_OptimizerCpuBudget0_AsyncScorerfalse_start20260114_162140_end20260114_162227.json'
-    # 'benchmark_v02_results_rw_02/raw_benchmark_data/run_concurrent_writes_Opt"auto"_Idx0_Segnull_SegNum0_IndTh20000_P8_T2_EF32_OptimizerCpuBudget0_AsyncScorerfalse_start20260114_162140_end20260114_162227.json'
-
-    # get metadata data
+    # ------------------------------------------------------------
+    # get bfb benchmark metadata
+    # ------------------------------------------------------------
     metadata_files = sorted(glob.glob(os.path.join(BASE_OUTPUT_DIR, "raw_benchmark_metadata", "*.json")))
     metadata_data = []
     for filepath in metadata_files:
         with open(filepath, "r") as f:
             data = json.load(f)
-        metadata_data.append({
-            "filepath": BASE_OUTPUT_DIR + "/raw_benchmark_data/" + data["benchmark_run_file"],
-            "writes_per_second": data["derived_metrics"]["vectors_per_second"]
-        })
+        metadata_data.append({"filepath": BASE_OUTPUT_DIR + "/raw_benchmark_data/" + data["benchmark_run_file"], "writes_per_second": data["derived_metrics"]["vectors_per_second"]})
     metadata_df = pd.DataFrame(metadata_data)
 
-
-    # get prometheus data
+    # ------------------------------------------------------------
+    # get sys_metrics prometheus data
+    # ------------------------------------------------------------
     sys_files = sorted(glob.glob(os.path.join(BASE_OUTPUT_DIR, "raw_sys_metrics", "*.txt")))
     prometheus_datas = []
     for filepath in sys_files:
         prometheus_data = parse_prometheus_data(filepath)
         ts = "_".join(os.path.basename(filepath).split("_")[-2:]).replace(".txt", "")
         prometheus_data["timestamp"] = datetime.strptime(ts, "%Y%m%d_%H%M%S")
-        mem_limit = prometheus_data.get("kube_pod_container_resource_limits")
-        if mem_limit:
+        mem_limit = prometheus_data.get("kube_pod_container_resource_limits_memory_byte")
+        if mem_limit and prometheus_data.get("container_memory_working_set_bytes"):
             prometheus_data["server_ram_%"] = prometheus_data["container_memory_working_set_bytes"] / mem_limit * 100
+        else:
+            prometheus_data["server_ram_%"] = None
         disc_limit = prometheus_data.get("kubelet_volume_stats_capacity_bytes")
         if disc_limit:
             prometheus_data["server_disk_%"] = prometheus_data.get("kubelet_volume_stats_used_bytes") / disc_limit * 100
+        else:
+            prometheus_data["server_disk_%"] = None
         prometheus_datas.append(prometheus_data)
     prometheus_df = pd.DataFrame(prometheus_datas)
     prometheus_df = prometheus_df.sort_values(by="timestamp").reset_index(drop=True)
@@ -284,9 +310,9 @@ for run in range(0, 20):
     cpu_limit_standard_cores = raw_limit_nanocores / 1e9
     prometheus_df["server_cpu_%"] = np.where(cpu_limit_standard_cores > 0, (cpu_rate_cores / cpu_limit_standard_cores) * 100, 0.0)
 
-
-
+    # ------------------------------------------------------------
     # get client stats data
+    # ------------------------------------------------------------
     client_stats_df = pd.read_csv(os.path.join(BASE_OUTPUT_DIR, "client_stats.csv"))
     client_stats_df["timestamp"] = pd.to_datetime(client_stats_df["timestamp"])
     client_stats_df["client_ram_%"] = client_stats_df["client_memory_mb"] / AVAILABLE_CLIENT_MEMORY_MB * 100
@@ -299,9 +325,6 @@ for run in range(0, 20):
     client_stats_df["bps_out"] = (client_stats_df["bytes_out_diff"] * 8) / client_stats_df["time_diff"]
     client_stats_df["client_in_%"] = (client_stats_df["bps_in"] / INSTANCE_MAX_BPS) * 100
     client_stats_df["client_out_%"] = (client_stats_df["bps_out"] / INSTANCE_MAX_BPS) * 100
-
-
-
 
     # --- AGGREGATION ---
     # combine time series data
@@ -353,14 +376,14 @@ for run in range(0, 20):
         "server_cpu_%_median",
         "server_cpu_%_max",
     ]
-    if 'qdrant_collection_config_optimizer_max_segment_size' not in stats_df_merged.columns:
+    if "qdrant_collection_config_optimizer_max_segment_size" not in stats_df_merged.columns:
         # weirdly, if max segment size is none, it doesnt show up in prometeus logs
         # so we need to add it manually
-        stats_df_merged['qdrant_collection_config_optimizer_max_segment_size'] = None
+        stats_df_merged["qdrant_collection_config_optimizer_max_segment_size"] = None
     if "qdrant_collection_config_optimizer_max_optimization_threads" not in stats_df_merged.columns:
         # weirdly, if max optimization threads is none, it doesnt show up in prometeus logs
         # so we need to add it manually
-        stats_df_merged['qdrant_collection_config_optimizer_max_optimization_threads'] = None
+        stats_df_merged["qdrant_collection_config_optimizer_max_optimization_threads"] = None
     result_df = stats_df_merged[columns_to_save]
     result_df.to_csv(os.path.join(BASE_OUTPUT_DIR, f"benchmark_summary_hardware.csv"), index=False)
     result_df_list.append(result_df)
