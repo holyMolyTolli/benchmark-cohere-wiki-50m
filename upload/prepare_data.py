@@ -1,10 +1,10 @@
 import os
+import time
 from typing import Iterable
 
 import tqdm
 from hf import read_dataset_stream
 from qdrant_client import QdrantClient, models
-import time
 
 QDRANT_CLUSTER_URL = os.getenv("QDRANT_CLUSTER_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
@@ -34,41 +34,37 @@ def create_collection(force_recreate=False):
         if client.collection_exists(COLLECTION_NAME):
             return
 
+        # quantization but with large instance type
+        # client.create_collection(
+        #     COLLECTION_NAME,
+        #     quantization_config=models.ScalarQuantization(
+        #         scalar=models.ScalarQuantizationConfig(type=models.ScalarType.INT8, always_ram=True, quantile=0.99),
+        #     ),
+        #     vectors_config=models.VectorParams(
+        #         size=VECTOR_SIZE,
+        #         distance=models.Distance.COSINE,
+        #         on_disk=False,
+        #         datatype=models.Datatype.FLOAT32,
+        #     ),
+        #     optimizers_config=models.OptimizersConfigDiff(indexing_threshold=0),
+        # )
+
+        # quantization but with smaller instance type
         client.create_collection(
             COLLECTION_NAME,
-            # --> no quantization --> YES quantization !!!
-            # quantization_config=models.ScalarQuantization(
-            #     scalar=models.ScalarQuantizationConfig(
-            #         type=models.ScalarType.INT8,
-            #         quantile=0.99,  # Optional: helps handle outliers for better accuracy
-            #         always_ram=True,  # Forces quantized vectors to stay in memory
-            #     ),
-            # ),
             quantization_config=models.ScalarQuantization(
-                scalar=models.ScalarQuantizationConfig(type=models.ScalarType.INT8, always_ram=True, quantile=0.99),  # Achieves the 4x compression  # Keeps quantized vectors in memory  # Recommended to handle outliers
+                scalar=models.ScalarQuantizationConfig(type=models.ScalarType.INT8, always_ram=True, quantile=0.99),
             ),
-            # --> leave hnsw_config at default values
-            # hnsw_config=models.HnswConfigDiff(
-            #     m=0,
-            #     ef_construct=256,
-            # ),
-            # scalar in memory + rescoring with full resolution off disk. !!!
             vectors_config=models.VectorParams(
                 size=VECTOR_SIZE,
                 distance=models.Distance.COSINE,
-                # --> set on_disk=False
-                # on_disk=True,
-                on_disk=False,
-                # --> change datatype=models.Datatype.FLOAT32
-                # datatype=models.Datatype.FLOAT16,
-                datatype=models.Datatype.FLOAT32,
+                on_disk=True,  # !!!
+                datatype=models.Datatype.FLOAT16,  # !!!
             ),
-            # --> do not set optimizers_config=models.OptimizersConfigDiff(max_segment_size=50_000_000) leave at default
-            optimizers_config=models.OptimizersConfigDiff(
-                # max_segment_size=50_000_000
-                indexing_threshold=0
-            ),
+            optimizers_config=models.OptimizersConfigDiff(indexing_threshold=0),
+            replication_factor=2,  # !!!
         )
+
     finally:
         client.close()
 

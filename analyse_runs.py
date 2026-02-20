@@ -23,7 +23,7 @@ def parse_prometheus_data(filepath):
 
     for line in contents:
         line = line.strip()
-        # Skip comments and empty lines
+
         if not line or line.startswith("#"):
             continue
 
@@ -60,16 +60,16 @@ def parse_prometheus_data(filepath):
             metrics[key_name].append({"labels": labels, "value": val})
             metrics_list.append({"key_name": key_name, "value": val, **labels})
 
-    df = pd.DataFrame(metrics_list)
-    for length in range(0, 500):
-        for column in df.columns:
-            # if df[column].nunique() == length:
-            if df[column].count() == length:
-                print(f"{column} ({df[column].nunique()} + {df[column].count()}): {" | ".join(sorted(df[column].unique().astype(str)))}")
-    for column in df.columns:
-        # if df[column].nunique() > length:
-        if df[column].count() > length:
-            print(f"{column} ({df[column].nunique()} + {df[column].count()}): {" | ".join(sorted(df[column].unique().astype(str)))}")
+    # df = pd.DataFrame(metrics_list)
+    # for length in range(0, 500):
+    #     for column in df.columns:
+    #         # if df[column].nunique() == length:
+    #         if df[column].count() == length:
+    #             print(f"{column} ({df[column].nunique()} + {df[column].count()}): {" | ".join(sorted(df[column].unique().astype(str)))}")
+    # for column in df.columns:
+    #     # if df[column].nunique() > length:
+    #     if df[column].count() > length:
+    #         print(f"{column} ({df[column].nunique()} + {df[column].count()}): {" | ".join(sorted(df[column].unique().astype(str)))}")
 
     # # sort metrics by key
     # count_8 = []
@@ -105,9 +105,11 @@ def parse_prometheus_data(filepath):
 
     cleaned_metrics = {}
     for key, value in metrics.items():
-        if len(value) == metrics["qdrant_operator_cluster_status_nodes"][0]["value"]:
+        server_node_count = metrics["qdrant_operator_cluster_status_nodes"][0]["value"]
+        if len(value) == server_node_count:
             value_sum = 0
             for item in value:
+                # container_name = item["labels"].get("container", "")
                 pod = item["labels"].get("pod")
                 persistentvolumeclaim = item["labels"].get("persistentvolumeclaim")
                 if pod:
@@ -127,7 +129,7 @@ def parse_prometheus_data(filepath):
 
             if should_average:
                 # Average: for configs, rates, and logical counts
-                cleaned_metrics[key] = value_sum / SERVER_NODE_COUNT
+                cleaned_metrics[key] = value_sum / server_node_count
             else:
                 # Default to SUM: for counters, capacities, bytes, CPU seconds, and histogram buckets
                 cleaned_metrics[key] = value_sum
@@ -244,7 +246,6 @@ INSTANCE_MAX_BPS = 12.5 * 1_000_000_000  # r6a.2xlarge specs: 8 vCPUs, 64 GiB RA
 AVAILABLE_CLIENT_MEMORY_MB = 64 * 1024
 
 # Server specs
-SERVER_NODE_COUNT = 4
 # TOTAL_CLUSTER_VCPUS = 64  # 4 nodes * 16 vCPU
 # TOTAL_CLUSTER_RAM_GB = 512  # 4 nodes * 128 GB (Adjust if different)
 # TOTAL_DISK_CAPACITY = 1024 * 1024 * 1024 * 1024  # 1024GiB
@@ -303,11 +304,11 @@ for run in range(0, 20):
         prometheus_datas.append(prometheus_data)
     prometheus_df = pd.DataFrame(prometheus_datas)
     prometheus_df = prometheus_df.sort_values(by="timestamp").reset_index(drop=True)
+
     time_delta_seconds = (prometheus_df["timestamp"] - prometheus_df["timestamp"].shift(1)).dt.total_seconds()
     cpu_usage_delta = prometheus_df["container_cpu_usage_seconds_total"] - prometheus_df["container_cpu_usage_seconds_total"].shift(1)
     cpu_rate_cores = np.where(time_delta_seconds > 0, cpu_usage_delta / time_delta_seconds, 0.0)
-    raw_limit_nanocores = prometheus_df.get("kube_pod_container_resource_limits", 0)
-    cpu_limit_standard_cores = raw_limit_nanocores / 1e9
+    cpu_limit_standard_cores = prometheus_df.get("kube_pod_container_resource_limits_cpu_core", 0)
     prometheus_df["server_cpu_%"] = np.where(cpu_limit_standard_cores > 0, (cpu_rate_cores / cpu_limit_standard_cores) * 100, 0.0)
 
     # ------------------------------------------------------------
@@ -388,5 +389,5 @@ for run in range(0, 20):
     result_df.to_csv(os.path.join(BASE_OUTPUT_DIR, f"benchmark_summary_hardware.csv"), index=False)
     result_df_list.append(result_df)
 
-result_df_list = pd.concat(result_df_list)
-result_df_list[columns_to_save].to_csv(f"{COLLECTION_NAME}_summary_hardware.csv", index=False)
+result_df_concat = pd.concat(result_df_list)
+result_df_concat[columns_to_save].to_csv(f"{COLLECTION_NAME}_summary_hardware.csv", index=False)
