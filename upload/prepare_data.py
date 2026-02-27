@@ -59,10 +59,10 @@ def create_collection(force_recreate=False):
                 size=VECTOR_SIZE,
                 distance=models.Distance.COSINE,
                 on_disk=True,  # !!!
-                datatype=models.Datatype.FLOAT16,  # !!!
+                datatype=models.Datatype.FLOAT32,  # !!!
             ),
             optimizers_config=models.OptimizersConfigDiff(indexing_threshold=0),
-            replication_factor=2,  # !!!
+            replication_factor=1,  # !!!
         )
 
     finally:

@@ -103,9 +103,14 @@ def parse_prometheus_data(filepath):
     # or logical cluster states that should be averaged.
     keys_to_average_explicit = ["collections_total", "rest_responses_avg_duration_seconds", "rest_responses_max_duration_seconds", "rest_responses_min_duration_seconds", "kube_pod_status_ready_time"]  # Corrected based on your feedback
 
+    try:
+        server_node_count = metrics["qdrant_operator_cluster_status_nodes"][0]["value"]
+    except KeyError:
+        print(f"No server node count found")
+        server_node_count = 1
+
     cleaned_metrics = {}
     for key, value in metrics.items():
-        server_node_count = metrics["qdrant_operator_cluster_status_nodes"][0]["value"]
         if len(value) == server_node_count:
             value_sum = 0
             for item in value:
@@ -238,156 +243,311 @@ def find_experiment_for_timestamp(timestamp, benchmark_df, add_seconds=0):
         return None
 
 
-COLLECTION_NAME = os.getenv("COLLECTION_NAME")
+for v in range(1, 10):
 
-# Client specs
-# January 05, 2026, 15:24:40 (UTC+01:00)
-INSTANCE_MAX_BPS = 12.5 * 1_000_000_000  # r6a.2xlarge specs: 8 vCPUs, 64 GiB RAM, Up to 12.5 Gbps Network
-AVAILABLE_CLIENT_MEMORY_MB = 64 * 1024
+    # COLLECTION_NAME = os.getenv("COLLECTION_NAME")
+    COLLECTION_NAME = f"benchmark_v{v:02d}"
 
-# Server specs
-# TOTAL_CLUSTER_VCPUS = 64  # 4 nodes * 16 vCPU
-# TOTAL_CLUSTER_RAM_GB = 512  # 4 nodes * 128 GB (Adjust if different)
-# TOTAL_DISK_CAPACITY = 1024 * 1024 * 1024 * 1024  # 1024GiB
+    # Client specs as of January 05, 2026, 15:24:40 (UTC+01:00)
+    INSTANCE_MAX_BPS = 12.5 * 1_000_000_000  # r6a.2xlarge specs: 8 vCPUs, 64 GiB RAM, Up to 12.5 Gbps Network
+    AVAILABLE_CLIENT_MEMORY_MB = 64 * 1024
 
-PARAM_PATTERNS = {"max_optimization_threads": r'_Opt("auto"|\d+)_', "max_indexing_threads": r"_Idx(\d+)_", "max_segment_size": r"_Seg(\d+)_", "default_segment_number": r"_SegNum(\d+)_", "indexing_threshold": r"_IndTh(\d+)_", "parallel": r"_P(\d+)_", "threads": r"_T(\d+)_", "hnsw_ef": r"_EF(\d+)_", "optimizer_cpu_budget": r"_OptimizerCpuBudget(\d+)_", "async_scorer": r"_AsyncScorer(true|false)_"}
-DEFAULT_VALUES = {"max_optimization_threads": "auto", "max_indexing_threads": 0, "max_segment_size": "auto", "default_segment_number": 0, "indexing_threshold": 10000, "optimizer_cpu_budget": "auto", "async_scorer": "false", "parallel": "N/A", "threads": "N/A", "hnsw_ef": "N/A"}
+    # Server specs
+    PARAM_PATTERNS = {"max_optimization_threads": r'_Opt("auto"|\d+)_', "max_indexing_threads": r"_Idx(\d+)_", "max_segment_size": r"_Seg(\d+)_", "default_segment_number": r"_SegNum(\d+)_", "indexing_threshold": r"_IndTh(\d+)_", "parallel": r"_P(\d+)_", "threads": r"_T(\d+)_", "hnsw_ef": r"_EF(\d+)_", "_optimizer_cpu_budget": r"_OptimizerCpuBudget(\d+)_", "_async_scorer": r"_AsyncScorer(true|false)_"}
+    DEFAULT_VALUES = {"max_optimization_threads": "auto", "max_indexing_threads": 0, "max_segment_size": "auto", "default_segment_number": 0, "indexing_threshold": 10000, "_optimizer_cpu_budget": "auto", "_async_scorer": "false", "parallel": "N/A", "threads": "N/A", "hnsw_ef": "N/A"}
 
-result_df_list = []
-for run in range(0, 20):
-    print(f"Processing run {run:02d}")
-    BASE_OUTPUT_DIR = f"{COLLECTION_NAME}_results_rw_{run:02d}"
-    # BASE_OUTPUT_DIR = os.getenv("BASE_OUTPUT_DIR")
-    BENCHMARK_FOLDER = f"{BASE_OUTPUT_DIR}/raw_benchmark_data"
+    result_df_list = []
+    for run in range(0, 20):
+        print(f"Processing run {run:02d}")
+        BASE_OUTPUT_DIR = f"{COLLECTION_NAME}_results_rw_{run:02d}"
+        BENCHMARK_FOLDER = f"{BASE_OUTPUT_DIR}/raw_benchmark_data"
 
-    # ------------------------------------------------------------
-    # get bfb benchmark data
-    # ------------------------------------------------------------
-    if not os.path.exists(BENCHMARK_FOLDER):
-        print(f"Benchmark folder {BENCHMARK_FOLDER} does not exist. Skipping run {run:02d}")
-        continue
-    file_list = glob.glob(os.path.join(BENCHMARK_FOLDER, "*.json"))
-    benchmark_metrics = compute_benchmark_metrics(file_list)
-    benchmark_df = pd.DataFrame(benchmark_metrics)
-    benchmark_df = benchmark_df.sort_values(by=["parallel", "hnsw_ef", "threads", "max_optimization_threads", "max_indexing_threads", "max_segment_size", "default_segment_number", "indexing_threshold"])
+        # ------------------------------------------------------------
+        # get bfb benchmark data
+        # ------------------------------------------------------------
+        if not os.path.exists(BENCHMARK_FOLDER) and not os.path.exists(f"{BASE_OUTPUT_DIR}/raw_benchmark_metadata"):
+            print(f"Benchmark folder {BENCHMARK_FOLDER} or raw_benchmark_metadata folder does not exist. Skipping run {run:02d}")
+            continue
+        file_list = glob.glob(os.path.join(BENCHMARK_FOLDER, "*.json"))
+        benchmark_metrics = compute_benchmark_metrics(file_list)
+        benchmark_df = pd.DataFrame(benchmark_metrics)
+        benchmark_df = benchmark_df.sort_values(by=["parallel", "hnsw_ef", "threads", "max_optimization_threads", "max_indexing_threads", "max_segment_size", "default_segment_number", "indexing_threshold"])
 
-    # ------------------------------------------------------------
-    # get bfb benchmark metadata
-    # ------------------------------------------------------------
-    metadata_files = sorted(glob.glob(os.path.join(BASE_OUTPUT_DIR, "raw_benchmark_metadata", "*.json")))
-    metadata_data = []
-    for filepath in metadata_files:
-        with open(filepath, "r") as f:
-            data = json.load(f)
-        metadata_data.append({"filepath": BASE_OUTPUT_DIR + "/raw_benchmark_data/" + data["benchmark_run_file"], "writes_per_second": data["derived_metrics"]["vectors_per_second"]})
-    metadata_df = pd.DataFrame(metadata_data)
+        # ------------------------------------------------------------
+        # get bfb benchmark metadata
+        # ------------------------------------------------------------
+        metadata_files = sorted(glob.glob(os.path.join(BASE_OUTPUT_DIR, "raw_benchmark_metadata", "*.json")))
+        metadata_data = []
+        for filepath in metadata_files:
+            with open(filepath, "r") as f:
+                data = json.load(f)
 
-    # ------------------------------------------------------------
-    # get sys_metrics prometheus data
-    # ------------------------------------------------------------
-    sys_files = sorted(glob.glob(os.path.join(BASE_OUTPUT_DIR, "raw_sys_metrics", "*.txt")))
-    prometheus_datas = []
-    for filepath in sys_files:
-        prometheus_data = parse_prometheus_data(filepath)
-        ts = "_".join(os.path.basename(filepath).split("_")[-2:]).replace(".txt", "")
-        prometheus_data["timestamp"] = datetime.strptime(ts, "%Y%m%d_%H%M%S")
-        mem_limit = prometheus_data.get("kube_pod_container_resource_limits_memory_byte")
-        if mem_limit and prometheus_data.get("container_memory_working_set_bytes"):
-            prometheus_data["server_ram_%"] = prometheus_data["container_memory_working_set_bytes"] / mem_limit * 100
-        else:
-            prometheus_data["server_ram_%"] = None
-        disc_limit = prometheus_data.get("kubelet_volume_stats_capacity_bytes")
-        if disc_limit:
-            prometheus_data["server_disk_%"] = prometheus_data.get("kubelet_volume_stats_used_bytes") / disc_limit * 100
-        else:
-            prometheus_data["server_disk_%"] = None
-        prometheus_datas.append(prometheus_data)
-    prometheus_df = pd.DataFrame(prometheus_datas)
-    prometheus_df = prometheus_df.sort_values(by="timestamp").reset_index(drop=True)
+            metadata_dict = {}
+            metadata_dict["filepath"] = BASE_OUTPUT_DIR + "/raw_benchmark_data/" + data["benchmark_run_file"]
+            metadata_dict["writes_per_second"] = data["derived_metrics"]["vectors_per_second"]
+            metadata_dict["segments_count"] = data["collection_snapshot"]["result"]["segments_count"]
+            metadata_dict["points_count"] = data["collection_snapshot"]["result"]["points_count"]
+            metadata_dict["indexed_vectors_count"] = data["collection_snapshot"]["result"]["indexed_vectors_count"]
+            metadata_dict["optimizer_status"] = data["collection_snapshot"]["result"]["optimizer_status"]
+            metadata_dict["status"] = data["collection_snapshot"]["result"]["status"]
 
-    time_delta_seconds = (prometheus_df["timestamp"] - prometheus_df["timestamp"].shift(1)).dt.total_seconds()
-    cpu_usage_delta = prometheus_df["container_cpu_usage_seconds_total"] - prometheus_df["container_cpu_usage_seconds_total"].shift(1)
-    cpu_rate_cores = np.where(time_delta_seconds > 0, cpu_usage_delta / time_delta_seconds, 0.0)
-    cpu_limit_standard_cores = prometheus_df.get("kube_pod_container_resource_limits_cpu_core", 0)
-    prometheus_df["server_cpu_%"] = np.where(cpu_limit_standard_cores > 0, (cpu_rate_cores / cpu_limit_standard_cores) * 100, 0.0)
+            # config parameters
+            metadata_dict["version"] = data["cluster_snapshot"]["cluster"]["configuration"]["version"]
+            metadata_dict['nodes_up'] = data["cluster_snapshot"]["cluster"]["state"]["nodesUp"]
+            metadata_dict["disk"] = data["cluster_snapshot"]["cluster"]["state"]["resources"]["disk"]["base"]
+            metadata_dict["ram"] = data["cluster_snapshot"]["cluster"]["state"]["resources"]["ram"]["base"]
+            metadata_dict["cpu"] = data["cluster_snapshot"]["cluster"]["state"]["resources"]["cpu"]["base"]
+            if data["cluster_snapshot"]["cluster"]["configuration"]["databaseConfiguration"]["storage"]["performance"].get("optimizerCpuBudget"):
+                metadata_dict["optimizer_cpu_budget"] = data["cluster_snapshot"]["cluster"]["configuration"]["databaseConfiguration"]["storage"]["performance"]["optimizerCpuBudget"]
+            else:
+                metadata_dict["optimizer_cpu_budget"] = None
+            if data["cluster_snapshot"]["cluster"]["configuration"]["databaseConfiguration"]["storage"]["performance"].get("asyncScorer"):
+                metadata_dict["async_scorer"] = data["cluster_snapshot"]["cluster"]["configuration"]["databaseConfiguration"]["storage"]["performance"]["asyncScorer"]
+            else:
+                metadata_dict["async_scorer"] = None
 
-    # ------------------------------------------------------------
-    # get client stats data
-    # ------------------------------------------------------------
-    client_stats_df = pd.read_csv(os.path.join(BASE_OUTPUT_DIR, "client_stats.csv"))
-    client_stats_df["timestamp"] = pd.to_datetime(client_stats_df["timestamp"])
-    client_stats_df["client_ram_%"] = client_stats_df["client_memory_mb"] / AVAILABLE_CLIENT_MEMORY_MB * 100
+            metadata_dict["shard_number"] = data["collection_snapshot"]["result"]["config"]["params"]["shard_number"]
+            metadata_dict["replication_factor"] = data["collection_snapshot"]["result"]["config"]["params"]["replication_factor"]
+            metadata_dict["write_consistency_factor"] = data["collection_snapshot"]["result"]["config"]["params"]["write_consistency_factor"]
+            metadata_dict["on_disk_payload"] = data["collection_snapshot"]["result"]["config"]["params"]["on_disk_payload"]
+            if data["collection_snapshot"]["result"].get("update_queue"):
+                metadata_dict["update_queue_length"] = data["collection_snapshot"]["result"]["update_queue"]["length"]
+            else:
+                metadata_dict["update_queue_length"] = None
 
-    client_stats_df.sort_values(by="timestamp", inplace=True)
-    client_stats_df["time_diff"] = client_stats_df["timestamp"].diff().dt.total_seconds()
-    client_stats_df["bytes_in_diff"] = client_stats_df["client_net_in_bytes"].diff()
-    client_stats_df["bytes_out_diff"] = client_stats_df["client_net_out_bytes"].diff()
-    client_stats_df["bps_in"] = (client_stats_df["bytes_in_diff"] * 8) / client_stats_df["time_diff"]  # Formula: (Bytes Diff * 8 bits/byte) / Time Diff in Seconds
-    client_stats_df["bps_out"] = (client_stats_df["bytes_out_diff"] * 8) / client_stats_df["time_diff"]
-    client_stats_df["client_in_%"] = (client_stats_df["bps_in"] / INSTANCE_MAX_BPS) * 100
-    client_stats_df["client_out_%"] = (client_stats_df["bps_out"] / INSTANCE_MAX_BPS) * 100
 
-    # --- AGGREGATION ---
-    # combine time series data
-    stats_df = prometheus_df.merge(client_stats_df, on="timestamp", how="outer")
-    stats_df["filepath"] = stats_df["timestamp"].apply(find_experiment_for_timestamp, benchmark_df=benchmark_df)
-    stats_df.dropna(subset=["filepath"], inplace=True)
+            metadata_dict["vectors_size"] = data["collection_snapshot"]["result"]["config"]["params"]["vectors"]["size"]
+            metadata_dict["vectors_distance"] = data["collection_snapshot"]["result"]["config"]["params"]["vectors"]["distance"]
+            metadata_dict["vectors_on_disk"] = data["collection_snapshot"]["result"]["config"]["params"]["vectors"]["on_disk"]
+            metadata_dict["vectors_datatype"] = data["collection_snapshot"]["result"]["config"]["params"]["vectors"]["datatype"]
 
-    client_server_system_columns = ["client_cpu_%", "client_ram_%", "client_in_%", "client_out_%", "server_ram_%", "server_disk_%", "server_cpu_%"]
-    final_stats = stats_df.groupby(["filepath"])[client_server_system_columns].agg(["median", "mean", "min", "max"]).reset_index()
-    final_stats.columns = ["_".join(col).strip("_") for col in final_stats.columns.values]
+            metadata_dict["hnsw_m"] = data["collection_snapshot"]["result"]["config"]["hnsw_config"]["m"]
+            metadata_dict["hnsw_ef_construct"] = data["collection_snapshot"]["result"]["config"]["hnsw_config"]["ef_construct"]
+            metadata_dict["hnsw_full_scan_threshold"] = data["collection_snapshot"]["result"]["config"]["hnsw_config"]["full_scan_threshold"]
+            metadata_dict["hnsw_max_indexing_threads"] = data["collection_snapshot"]["result"]["config"]["hnsw_config"]["max_indexing_threads"]
+            metadata_dict["hnsw_on_disk"] = data["collection_snapshot"]["result"]["config"]["hnsw_config"]["on_disk"]
 
-    prometheus_parameter_columns = [param for param in stats_df.columns if param.startswith("qdrant_collection_") and any(param.endswith(p) for p in PARAM_PATTERNS.keys())]
-    prometheus_parameter_df = stats_df.dropna(subset="app_info_0")[["filepath"] + prometheus_parameter_columns].drop_duplicates()
+            metadata_dict["optimizer_deleted_threshold"] = data["collection_snapshot"]["result"]["config"]["optimizer_config"]["deleted_threshold"]
+            metadata_dict["optimizer_vacuum_min_vector_number"] = data["collection_snapshot"]["result"]["config"]["optimizer_config"]["vacuum_min_vector_number"]
+            metadata_dict["optimizer_default_segment_number"] = data["collection_snapshot"]["result"]["config"]["optimizer_config"]["default_segment_number"]
+            metadata_dict["optimizer_max_segment_size"] = data["collection_snapshot"]["result"]["config"]["optimizer_config"]["max_segment_size"]
+            metadata_dict["optimizer_memmap_threshold"] = data["collection_snapshot"]["result"]["config"]["optimizer_config"]["memmap_threshold"]
+            metadata_dict["optimizer_indexing_threshold"] = data["collection_snapshot"]["result"]["config"]["optimizer_config"]["indexing_threshold"]
+            metadata_dict["optimizer_flush_interval_sec"] = data["collection_snapshot"]["result"]["config"]["optimizer_config"]["flush_interval_sec"]
+            metadata_dict["optimizer_max_optimization_threads"] = data["collection_snapshot"]["result"]["config"]["optimizer_config"]["max_optimization_threads"]
 
-    stats_df_merged = final_stats.merge(benchmark_df, on="filepath", how="outer").merge(prometheus_parameter_df, on="filepath", how="outer").merge(metadata_df, on="filepath", how="outer")
+            if data["collection_snapshot"]["result"]["config"]["optimizer_config"].get("prevent_unoptimized"):
+                metadata_dict["optimizer_prevent_unoptimized"] = data["collection_snapshot"]["result"]["config"]["optimizer_config"]["prevent_unoptimized"]
+            else:
+                metadata_dict["optimizer_prevent_unoptimized"] = None
 
-    # Save
-    # base_columns = ["filepath", "rps_median", "server_p99_ms"]
-    # parameter_columns = prometheus_parameter_columns + [param for param in PARAM_PATTERNS.keys()]
-    # computed_percentile_columns = [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
-    # columns_to_save = base_columns + parameter_columns + computed_percentile_columns
-    columns_to_save = [
-        "filepath",
-        "rps_median",
-        "server_p99_ms",
-        "writes_per_second",
-        "qdrant_collection_config_optimizer_max_optimization_threads",
-        "qdrant_collection_config_hnsw_max_indexing_threads",
-        "qdrant_collection_config_optimizer_default_segment_number",
-        "qdrant_collection_config_optimizer_max_segment_size",
-        "qdrant_collection_config_optimizer_indexing_threshold",
-        "optimizer_cpu_budget",
-        "async_scorer",
-        "parallel",
-        "threads",
-        "hnsw_ef",
-        "client_cpu_%_median",
-        "client_cpu_%_max",
-        "client_ram_%_median",
-        "client_ram_%_max",
-        "client_in_%_median",
-        "client_in_%_max",
-        "client_out_%_median",
-        "client_out_%_max",
-        "server_ram_%_median",
-        "server_ram_%_max",
-        "server_disk_%_median",
-        "server_disk_%_max",
-        "server_cpu_%_median",
-        "server_cpu_%_max",
-    ]
-    if "qdrant_collection_config_optimizer_max_segment_size" not in stats_df_merged.columns:
-        # weirdly, if max segment size is none, it doesnt show up in prometeus logs
-        # so we need to add it manually
-        stats_df_merged["qdrant_collection_config_optimizer_max_segment_size"] = None
-    if "qdrant_collection_config_optimizer_max_optimization_threads" not in stats_df_merged.columns:
-        # weirdly, if max optimization threads is none, it doesnt show up in prometeus logs
-        # so we need to add it manually
-        stats_df_merged["qdrant_collection_config_optimizer_max_optimization_threads"] = None
-    result_df = stats_df_merged[columns_to_save]
-    result_df.to_csv(os.path.join(BASE_OUTPUT_DIR, f"benchmark_summary_hardware.csv"), index=False)
-    result_df_list.append(result_df)
+            if data["collection_snapshot"]["result"]["config"]["quantization_config"]:
+                metadata_dict["quantization"] = list(data["collection_snapshot"]["result"]["config"]["quantization_config"].keys())[0]
+                metadata_dict["quantization_type"] = data["collection_snapshot"]["result"]["config"]["quantization_config"][metadata_dict["quantization"]]["type"]
+                metadata_dict["quantization_quantile"] = data["collection_snapshot"]["result"]["config"]["quantization_config"][metadata_dict["quantization"]]["quantile"]
+                metadata_dict["quantization_always_ram"] = data["collection_snapshot"]["result"]["config"]["quantization_config"][metadata_dict["quantization"]]["always_ram"]
+            else:
+                metadata_dict["quantization"] = None
+                metadata_dict["quantization_type"] = None
+                metadata_dict["quantization_quantile"] = None
+                metadata_dict["quantization_always_ram"] = None
+
+            metadata_data.append(metadata_dict)
+
+        metadata_df = pd.DataFrame(metadata_data).sort_values(by="filepath")
+
+        # ------------------------------------------------------------
+        # get sys_metrics prometheus data
+        # ------------------------------------------------------------
+        sys_files = sorted(glob.glob(os.path.join(BASE_OUTPUT_DIR, "raw_sys_metrics", "*.txt")))
+        prometheus_datas = []
+        for filepath in sys_files:
+            prometheus_data = parse_prometheus_data(filepath)
+            ts = "_".join(os.path.basename(filepath).split("_")[-2:]).replace(".txt", "")
+            prometheus_data["timestamp"] = datetime.strptime(ts, "%Y%m%d_%H%M%S")
+            mem_limit = prometheus_data.get("kube_pod_container_resource_limits_memory_byte")
+            if mem_limit and prometheus_data.get("container_memory_working_set_bytes"):
+                prometheus_data["server_ram_%"] = prometheus_data["container_memory_working_set_bytes"] / mem_limit * 100
+            else:
+                prometheus_data["server_ram_%"] = None
+            disc_limit = prometheus_data.get("kubelet_volume_stats_capacity_bytes")
+            if disc_limit:
+                prometheus_data["server_disk_%"] = prometheus_data.get("kubelet_volume_stats_used_bytes") / disc_limit * 100
+            else:
+                prometheus_data["server_disk_%"] = None
+            prometheus_datas.append(prometheus_data)
+        prometheus_df = pd.DataFrame(prometheus_datas)
+        prometheus_df = prometheus_df.sort_values(by="timestamp").reset_index(drop=True)
+
+        # because several timestamps in a row have the same container_cpu_usage_seconds_total value, i remove duplicates by grouoping
+        cpu_update_df = prometheus_df[["timestamp", "container_cpu_usage_seconds_total", "kube_pod_container_resource_limits_cpu_core"]]
+        cpu_update_df = cpu_update_df.dropna(subset=["container_cpu_usage_seconds_total", "kube_pod_container_resource_limits_cpu_core"])
+        cpu_update_df = cpu_update_df.groupby(["container_cpu_usage_seconds_total", "kube_pod_container_resource_limits_cpu_core"]).agg(list).reset_index()
+        cpu_update_df["min"] = cpu_update_df.apply(lambda x: min(x["timestamp"]), axis=1)
+        cpu_update_df["delta"] = cpu_update_df.apply(lambda x: max(x["timestamp"]) - min(x["timestamp"]), axis=1)
+
+        cpu_update_df = cpu_update_df.sort_values(by="min")
+        cpu_update_df["time_delta_seconds"] = (cpu_update_df["min"] - cpu_update_df["min"].shift(1)).dt.total_seconds()
+        cpu_update_df["cpu_usage_delta"] = cpu_update_df["container_cpu_usage_seconds_total"] - cpu_update_df["container_cpu_usage_seconds_total"].shift(1)
+        cpu_update_df["cpu_rate_cores"] = np.where(cpu_update_df["time_delta_seconds"] > 0, cpu_update_df["cpu_usage_delta"] / cpu_update_df["time_delta_seconds"], 0.0)
+
+        # cpu_update_df[(cpu_update_df["min"] >= datetime(2026, 2, 24, 12, 45, 00)) & (cpu_update_df["min"] <= datetime(2026, 2, 24, 12, 55, 00))]
+
+        cpu_update_df = cpu_update_df[cpu_update_df["cpu_rate_cores"] > 0]
+        cpu_update_df = cpu_update_df[["cpu_rate_cores", "timestamp"]].explode("timestamp", ignore_index=True)
+
+        prometheus_df = prometheus_df.merge(cpu_update_df, on="timestamp", how="outer")
+        prometheus_df["server_cpu_%"] = np.where(prometheus_df.get("kube_pod_container_resource_limits_cpu_core", 0) > 0, (prometheus_df["cpu_rate_cores"] / prometheus_df.get("kube_pod_container_resource_limits_cpu_core", 0)) * 100, 0.0)
+
+        # prometheus_df[(prometheus_df["timestamp"] >= datetime(2026, 2, 24, 11, 51, 00)) & (prometheus_df["timestamp"] <= datetime(2026, 2, 24, 11, 54, 00))][['timestamp', 'container_cpu_usage_seconds_total', 'kube_pod_container_resource_limits_cpu_core', "cpu_rate_cores", "server_cpu_%"]]
+
+        # ------------------------------------------------------------
+        # get client stats data
+        # ------------------------------------------------------------
+        client_stats_df = pd.read_csv(os.path.join(BASE_OUTPUT_DIR, "client_stats.csv"))
+        client_stats_df["timestamp"] = pd.to_datetime(client_stats_df["timestamp"])
+        client_stats_df["client_ram_%"] = client_stats_df["client_memory_mb"] / AVAILABLE_CLIENT_MEMORY_MB * 100
+
+        client_stats_df.sort_values(by="timestamp", inplace=True)
+        client_stats_df["time_diff"] = client_stats_df["timestamp"].diff().dt.total_seconds()
+        client_stats_df["bytes_in_diff"] = client_stats_df["client_net_in_bytes"].diff()
+        client_stats_df["bytes_out_diff"] = client_stats_df["client_net_out_bytes"].diff()
+        client_stats_df["bps_in"] = (client_stats_df["bytes_in_diff"] * 8) / client_stats_df["time_diff"]  # Formula: (Bytes Diff * 8 bits/byte) / Time Diff in Seconds
+        client_stats_df["bps_out"] = (client_stats_df["bytes_out_diff"] * 8) / client_stats_df["time_diff"]
+        client_stats_df["client_in_%"] = (client_stats_df["bps_in"] / INSTANCE_MAX_BPS) * 100
+        client_stats_df["client_out_%"] = (client_stats_df["bps_out"] / INSTANCE_MAX_BPS) * 100
+
+        # --- AGGREGATION ---
+        # combine time series data
+        stats_df = prometheus_df.merge(client_stats_df, on="timestamp", how="outer")
+        stats_df["filepath"] = stats_df["timestamp"].apply(find_experiment_for_timestamp, benchmark_df=benchmark_df)
+        stats_df.dropna(subset=["filepath"], inplace=True)
+
+        # get stats based on client and server metrics
+        client_server_system_columns = ["client_cpu_%", "client_ram_%", "client_in_%", "client_out_%", "server_ram_%", "server_disk_%", "server_cpu_%"]
+        final_stats = stats_df.groupby(["filepath"])[client_server_system_columns].agg(["median", "mean", "min", "max"]).reset_index()
+        final_stats.columns = ["_".join(col).strip("_") for col in final_stats.columns.values]
+
+        # get parameters based on prometheus data.
+        # sometimes there are duplicate filepath because some prometheus stats have empty values faulsly leading to one experiment being assigned to two configs. we remove those empty config rows.
+        prometheus_parameter_columns = [param for param in stats_df.columns if param.startswith("qdrant_collection_") and any(param.endswith(p) for p in PARAM_PATTERNS.keys())]
+        prometheus_parameter_df = stats_df.dropna(subset="app_info_0")[["filepath"] + prometheus_parameter_columns].drop_duplicates()
+
+        def select_parameter_values(values):
+            if len(values) == 1:
+                return values[0]
+            else:
+                # remove nan from list
+                values = [v for v in values if pd.notna(v)]
+                if len(values) == 1:
+                    return values[0]
+                else:
+                    return None
+
+        prometheus_parameter_df = prometheus_parameter_df.groupby(["filepath"]).agg(list).reset_index()
+        for col in prometheus_parameter_df.columns:
+            if col != "filepath":
+                prometheus_parameter_df[col] = prometheus_parameter_df[col].apply(select_parameter_values)
+
+        # combine benchmark with client and server metrics and parameters
+        stats_df_merged = final_stats.merge(benchmark_df, on="filepath", how="outer").merge(prometheus_parameter_df, on="filepath", how="outer").merge(metadata_df, on="filepath", how="outer")
+
+        # Save
+        # base_columns = ["filepath", "rps_median", "server_p99_ms"]
+        # parameter_columns = prometheus_parameter_columns + [param for param in PARAM_PATTERNS.keys()]
+        # computed_percentile_columns = [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
+        # columns_to_save = base_columns + parameter_columns + computed_percentile_columns
+        columns_to_save = [
+            "filepath",
+            "rps_median",
+            "server_p99_ms",
+
+            'writes_per_second',
+            'segments_count',
+            'points_count',
+            'indexed_vectors_count',
+            'optimizer_status',
+            'status',
+            'version',
+            'nodes_up',
+            'disk',
+            'ram',
+            'cpu',
+            'optimizer_cpu_budget',
+            'async_scorer',
+            'shard_number',
+            'replication_factor',
+            'write_consistency_factor',
+            'on_disk_payload',
+            'update_queue_length',
+            'vectors_size',
+            'vectors_distance',
+            'vectors_on_disk',
+            'vectors_datatype',
+            'hnsw_m',
+            'hnsw_ef_construct',
+            'hnsw_full_scan_threshold',
+            'hnsw_max_indexing_threads',
+            'hnsw_on_disk',
+            'optimizer_deleted_threshold',
+            'optimizer_vacuum_min_vector_number',
+            'optimizer_default_segment_number',
+            'optimizer_max_segment_size',
+            'optimizer_memmap_threshold',
+            'optimizer_indexing_threshold',
+            'optimizer_flush_interval_sec',
+            'optimizer_max_optimization_threads',
+            'optimizer_prevent_unoptimized',
+            'quantization',
+            'quantization_type',
+            'quantization_quantile',
+            'quantization_always_ram',
+            # "qdrant_collection_config_optimizer_indexing_threshold",
+            # "qdrant_collection_config_optimizer_default_segment_number",
+            # "qdrant_collection_config_optimizer_max_segment_size",
+            # "qdrant_collection_config_optimizer_max_optimization_threads",
+            # "qdrant_collection_config_hnsw_max_indexing_threads",
+            # "optimizer_cpu_budget",
+            # "async_scorer",
+            "parallel",
+            "threads",
+            "hnsw_ef",
+            "client_cpu_%_median",
+            "client_cpu_%_max",
+            "client_ram_%_median",
+            "client_ram_%_max",
+            "client_in_%_median",
+            "client_in_%_max",
+            "client_out_%_median",
+            "client_out_%_max",
+            "server_ram_%_median",
+            "server_ram_%_max",
+            "server_disk_%_median",
+            "server_disk_%_max",
+            "server_cpu_%_median",
+            "server_cpu_%_max",
+        ]
+        # rename columns
+        # rename_columns = {
+        #     "qdrant_collection_config_optimizer_indexing_threshold": "indexing_threshold",
+        #     "qdrant_collection_config_optimizer_default_segment_number": "default_segment_number",
+        #     "qdrant_collection_config_optimizer_max_segment_size": "max_segment_size",
+        #     "qdrant_collection_config_optimizer_max_optimization_threads": "max_optimization_threads",
+        #     "qdrant_collection_config_hnsw_max_indexing_threads": "max_indexing_threads",
+        # }
+
+        if "qdrant_collection_config_optimizer_max_segment_size" not in stats_df_merged.columns:
+            # weirdly, if max segment size is none, it doesnt show up in prometeus logs
+            # so we need to add it manually
+            stats_df_merged["qdrant_collection_config_optimizer_max_segment_size"] = None
+        if "qdrant_collection_config_optimizer_max_optimization_threads" not in stats_df_merged.columns:
+            # weirdly, if max optimization threads is none, it doesnt show up in prometeus logs
+            # so we need to add it manually
+            stats_df_merged["qdrant_collection_config_optimizer_max_optimization_threads"] = None
+        result_df = stats_df_merged[columns_to_save]#.rename(columns=rename_columns)
+
+        result_df.to_csv(os.path.join(BASE_OUTPUT_DIR, f"benchmark_summary_hardware.csv"), index=False)
+        result_df_list.append(result_df)
 
 result_df_concat = pd.concat(result_df_list)
-result_df_concat[columns_to_save].to_csv(f"{COLLECTION_NAME}_summary_hardware.csv", index=False)
+result_df_concat.to_csv(f"{COLLECTION_NAME}_summary_hardware.csv", index=False)

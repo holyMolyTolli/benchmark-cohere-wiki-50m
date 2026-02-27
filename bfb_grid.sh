@@ -23,23 +23,23 @@ mkdir -p "$RAW_METADATA_DIR"  # <--- ADD THIS
 
 
 # --- GRID ---
-MAX_OPTIMIZATION_THREADS_LIST=(31 \"auto\" 16 ) # \"auto\" 0 1 2 4
+MAX_OPTIMIZATION_THREADS_LIST=(\"auto\") # \"auto\" 0 1 2 4
 # If null - have no limit and choose dynamically to saturate CPU.
 # If 0 - no optimization threads, optimizations will be disabled.
 
-MAX_INDEXING_THREADS_LIST=(31 0 1 16 ) # 0 1 2 4 8
+MAX_INDEXING_THREADS_LIST=(0) # 0 1 2 4 8
 # If 0 - automatically select.
 
 DEFAULT_SEGMENT_NUMBER_LIST=(0) #  0 1 2 100 200 300
 # If `default_segment_number = 0`, will be automatically selected by the number of available CPUs
 
-MAX_SEGMENT_SIZE_LIST=(55000) # 100000 150000 200000) # **null????** 20000 150000 200000 2000000
+MAX_SEGMENT_SIZE_LIST=(500000 1000000 2000000) # 100000 150000 200000) # **null????** 20000 150000 200000 2000000
 # If not set, will be automatically selected considering the number of available CPUs.
 
 INDEXING_THRESHOLD_LIST=(20000) # 0 2000 20000 200000
 # To explicitly disable vector indexing, set to `0`.
 
-OPTIMIZER_CPU_BUDGET_LIST=(31 0 1 16 ) # 0)
+OPTIMIZER_CPU_BUDGET_LIST=(31) # 0 1 16 31
 # If 0 - auto selection, keep 1 or more CPUs unallocated depending on CPU size
 # If negative - subtract this number of CPUs from the available CPUs.
 # If positive - use this exact number of CPUs.
