@@ -27,6 +27,9 @@ def parse_prometheus_data(filepath):
         if not line or line.startswith("#"):
             continue
 
+        # if 'qdrant_operator_cluster_info_total' in line:
+        #     assert False
+
         match = pattern.match(line)
         if match:
             key_name = match.group(1)
@@ -111,6 +114,9 @@ def parse_prometheus_data(filepath):
 
     cleaned_metrics = {}
     for key, value in metrics.items():
+        if key == 'qdrant_operator_cluster_info_total':
+            cleaned_metrics["qdrant_operator_cluster_info_total_node_type"] = value[0]["labels"]["node_type"]
+
         if len(value) == server_node_count:
             value_sum = 0
             for item in value:
@@ -243,6 +249,7 @@ def find_experiment_for_timestamp(timestamp, benchmark_df, add_seconds=0):
         return None
 
 
+result_df_list = []
 for v in range(1, 10):
 
     # COLLECTION_NAME = os.getenv("COLLECTION_NAME")
@@ -256,18 +263,18 @@ for v in range(1, 10):
     PARAM_PATTERNS = {"max_optimization_threads": r'_Opt("auto"|\d+)_', "max_indexing_threads": r"_Idx(\d+)_", "max_segment_size": r"_Seg(\d+)_", "default_segment_number": r"_SegNum(\d+)_", "indexing_threshold": r"_IndTh(\d+)_", "parallel": r"_P(\d+)_", "threads": r"_T(\d+)_", "hnsw_ef": r"_EF(\d+)_", "_optimizer_cpu_budget": r"_OptimizerCpuBudget(\d+)_", "_async_scorer": r"_AsyncScorer(true|false)_"}
     DEFAULT_VALUES = {"max_optimization_threads": "auto", "max_indexing_threads": 0, "max_segment_size": "auto", "default_segment_number": 0, "indexing_threshold": 10000, "_optimizer_cpu_budget": "auto", "_async_scorer": "false", "parallel": "N/A", "threads": "N/A", "hnsw_ef": "N/A"}
 
-    result_df_list = []
     for run in range(0, 20):
-        print(f"Processing run {run:02d}")
         BASE_OUTPUT_DIR = f"{COLLECTION_NAME}_results_rw_{run:02d}"
         BENCHMARK_FOLDER = f"{BASE_OUTPUT_DIR}/raw_benchmark_data"
 
         # ------------------------------------------------------------
         # get bfb benchmark data
         # ------------------------------------------------------------
-        if not os.path.exists(BENCHMARK_FOLDER) and not os.path.exists(f"{BASE_OUTPUT_DIR}/raw_benchmark_metadata"):
-            print(f"Benchmark folder {BENCHMARK_FOLDER} or raw_benchmark_metadata folder does not exist. Skipping run {run:02d}")
+        if not os.path.exists(BENCHMARK_FOLDER) or not os.path.exists(f"{BASE_OUTPUT_DIR}/raw_benchmark_metadata"):
             continue
+        else:
+            print(f"Processing {BASE_OUTPUT_DIR}")
+
         file_list = glob.glob(os.path.join(BENCHMARK_FOLDER, "*.json"))
         benchmark_metrics = compute_benchmark_metrics(file_list)
         benchmark_df = pd.DataFrame(benchmark_metrics)
@@ -293,7 +300,7 @@ for v in range(1, 10):
 
             # config parameters
             metadata_dict["version"] = data["cluster_snapshot"]["cluster"]["configuration"]["version"]
-            metadata_dict['nodes_up'] = data["cluster_snapshot"]["cluster"]["state"]["nodesUp"]
+            metadata_dict["nodes_up"] = data["cluster_snapshot"]["cluster"]["state"]["nodesUp"]
             metadata_dict["disk"] = data["cluster_snapshot"]["cluster"]["state"]["resources"]["disk"]["base"]
             metadata_dict["ram"] = data["cluster_snapshot"]["cluster"]["state"]["resources"]["ram"]["base"]
             metadata_dict["cpu"] = data["cluster_snapshot"]["cluster"]["state"]["resources"]["cpu"]["base"]
@@ -314,7 +321,6 @@ for v in range(1, 10):
                 metadata_dict["update_queue_length"] = data["collection_snapshot"]["result"]["update_queue"]["length"]
             else:
                 metadata_dict["update_queue_length"] = None
-
 
             metadata_dict["vectors_size"] = data["collection_snapshot"]["result"]["config"]["params"]["vectors"]["size"]
             metadata_dict["vectors_distance"] = data["collection_snapshot"]["result"]["config"]["params"]["vectors"]["distance"]
@@ -430,7 +436,7 @@ for v in range(1, 10):
 
         # get parameters based on prometheus data.
         # sometimes there are duplicate filepath because some prometheus stats have empty values faulsly leading to one experiment being assigned to two configs. we remove those empty config rows.
-        prometheus_parameter_columns = [param for param in stats_df.columns if param.startswith("qdrant_collection_") and any(param.endswith(p) for p in PARAM_PATTERNS.keys())]
+        prometheus_parameter_columns = [param for param in stats_df.columns if param.startswith("qdrant_collection_") and any(param.endswith(p) for p in PARAM_PATTERNS.keys())] + ["qdrant_operator_cluster_info_total_node_type"]
         prometheus_parameter_df = stats_df.dropna(subset="app_info_0")[["filepath"] + prometheus_parameter_columns].drop_duplicates()
 
         def select_parameter_values(values):
@@ -458,75 +464,68 @@ for v in range(1, 10):
         # computed_percentile_columns = [col for col in final_stats.columns if (col.endswith("_max") or col.endswith("_median")) and not col.startswith("rps_")]
         # columns_to_save = base_columns + parameter_columns + computed_percentile_columns
         columns_to_save = [
-            "filepath",
-            "rps_median",
-            "server_p99_ms",
-
-            'writes_per_second',
-            'segments_count',
-            'points_count',
-            'indexed_vectors_count',
-            'optimizer_status',
-            'status',
-            'version',
-            'nodes_up',
-            'disk',
-            'ram',
-            'cpu',
-            'optimizer_cpu_budget',
-            'async_scorer',
-            'shard_number',
-            'replication_factor',
-            'write_consistency_factor',
-            'on_disk_payload',
-            'update_queue_length',
-            'vectors_size',
-            'vectors_distance',
-            'vectors_on_disk',
-            'vectors_datatype',
-            'hnsw_m',
-            'hnsw_ef_construct',
-            'hnsw_full_scan_threshold',
-            'hnsw_max_indexing_threads',
-            'hnsw_on_disk',
-            'optimizer_deleted_threshold',
-            'optimizer_vacuum_min_vector_number',
-            'optimizer_default_segment_number',
-            'optimizer_max_segment_size',
-            'optimizer_memmap_threshold',
-            'optimizer_indexing_threshold',
-            'optimizer_flush_interval_sec',
-            'optimizer_max_optimization_threads',
-            'optimizer_prevent_unoptimized',
-            'quantization',
-            'quantization_type',
-            'quantization_quantile',
-            'quantization_always_ram',
-            # "qdrant_collection_config_optimizer_indexing_threshold",
-            # "qdrant_collection_config_optimizer_default_segment_number",
-            # "qdrant_collection_config_optimizer_max_segment_size",
-            # "qdrant_collection_config_optimizer_max_optimization_threads",
-            # "qdrant_collection_config_hnsw_max_indexing_threads",
-            # "optimizer_cpu_budget",
-            # "async_scorer",
-            "parallel",
-            "threads",
-            "hnsw_ef",
-            "client_cpu_%_median",
-            "client_cpu_%_max",
-            "client_ram_%_median",
-            "client_ram_%_max",
-            "client_in_%_median",
-            "client_in_%_max",
-            "client_out_%_median",
-            "client_out_%_max",
-            "server_ram_%_median",
-            "server_ram_%_max",
-            "server_disk_%_median",
-            "server_disk_%_max",
-            "server_cpu_%_median",
-            "server_cpu_%_max",
-        ]
+                "nodes_up",
+                "qdrant_operator_cluster_info_total_node_type",
+                "disk",
+                "ram",
+                "cpu",
+                "replication_factor",
+                "shard_number",
+                "filepath",
+                "rps_median",
+                "server_p99_ms",
+                "writes_per_second",
+                "segments_count",
+                "points_count",
+                "indexed_vectors_count",
+                "update_queue_length",
+                "optimizer_status",
+                "status",
+                "version",
+                "optimizer_max_segment_size",
+                "optimizer_cpu_budget",
+                "optimizer_max_optimization_threads",
+                "hnsw_max_indexing_threads",
+                "async_scorer",
+                "write_consistency_factor",
+                "on_disk_payload",
+                "vectors_size",
+                "vectors_distance",
+                "vectors_on_disk",
+                "vectors_datatype",
+                "hnsw_m",
+                "hnsw_ef_construct",
+                "hnsw_full_scan_threshold",
+                "hnsw_on_disk",
+                "optimizer_deleted_threshold",
+                "optimizer_vacuum_min_vector_number",
+                "optimizer_default_segment_number",
+                "optimizer_memmap_threshold",
+                "optimizer_indexing_threshold",
+                "optimizer_flush_interval_sec",
+                "optimizer_prevent_unoptimized",
+                "quantization",
+                "quantization_type",
+                "quantization_quantile",
+                "quantization_always_ram",
+                "parallel",
+                "threads",
+                "hnsw_ef",
+                "client_cpu_%_median",
+                "client_cpu_%_max",
+                "client_ram_%_median",
+                "client_ram_%_max",
+                "client_in_%_median",
+                "client_in_%_max",
+                "client_out_%_median",
+                "client_out_%_max",
+                "server_ram_%_median",
+                "server_ram_%_max",
+                "server_disk_%_median",
+                "server_disk_%_max",
+                "server_cpu_%_median",
+                "server_cpu_%_max"
+            ]
         # rename columns
         # rename_columns = {
         #     "qdrant_collection_config_optimizer_indexing_threshold": "indexing_threshold",
@@ -544,10 +543,10 @@ for v in range(1, 10):
             # weirdly, if max optimization threads is none, it doesnt show up in prometeus logs
             # so we need to add it manually
             stats_df_merged["qdrant_collection_config_optimizer_max_optimization_threads"] = None
-        result_df = stats_df_merged[columns_to_save]#.rename(columns=rename_columns)
+        result_df = stats_df_merged[columns_to_save]  # .rename(columns=rename_columns)
 
         result_df.to_csv(os.path.join(BASE_OUTPUT_DIR, f"benchmark_summary_hardware.csv"), index=False)
         result_df_list.append(result_df)
 
 result_df_concat = pd.concat(result_df_list)
-result_df_concat.to_csv(f"{COLLECTION_NAME}_summary_hardware.csv", index=False)
+result_df_concat[columns_to_save].to_csv(f"{COLLECTION_NAME}_summary_hardware.csv", index=False)

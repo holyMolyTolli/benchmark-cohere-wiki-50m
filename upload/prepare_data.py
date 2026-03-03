@@ -62,7 +62,7 @@ def create_collection(force_recreate=False):
                 datatype=models.Datatype.FLOAT32,  # !!!
             ),
             optimizers_config=models.OptimizersConfigDiff(indexing_threshold=0),
-            replication_factor=1,  # !!!
+            replication_factor=2,  # !!!
         )
 
     finally:
