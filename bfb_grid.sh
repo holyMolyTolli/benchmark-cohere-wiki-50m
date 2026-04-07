@@ -33,7 +33,7 @@ MAX_INDEXING_THREADS_LIST=(0) # 0 1 2 4 8
 DEFAULT_SEGMENT_NUMBER_LIST=(0) #  0 1 2 100 200 300
 # If `default_segment_number = 0`, will be automatically selected by the number of available CPUs
 
-MAX_SEGMENT_SIZE_LIST=(50000 100000 200000 500000 1000000 2000000 5000000) # 100000 150000 200000) # **null????** 20000 150000 200000 2000000
+MAX_SEGMENT_SIZE_LIST=(10000 100000 500000 1000000) # 100000 150000 200000) # **null????** 20000 150000 200000 2000000
 # If not set, will be automatically selected considering the number of available CPUs.
 
 INDEXING_THRESHOLD_LIST=(20000) # 0 2000 20000 200000

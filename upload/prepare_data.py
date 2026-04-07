@@ -1,6 +1,7 @@
 import os
 import time
 from typing import Iterable
+import random
 
 import tqdm
 from hf import read_dataset_stream
@@ -25,7 +26,8 @@ VECTOR_SIZE = 768
 
 
 def create_collection(force_recreate=False):
-    client = QdrantClient(url=QDRANT_CLUSTER_URL, api_key=QDRANT_API_KEY, prefer_grpc=True, timeout=36000)  # For full-scan search
+    # client = QdrantClient(url=QDRANT_CLUSTER_URL, api_key=QDRANT_API_KEY, prefer_grpc=True, timeout=36000)  # For full-scan search
+    client = QdrantClient(url=QDRANT_CLUSTER_URL, api_key=QDRANT_API_KEY, prefer_grpc=True, https=False, timeout=36000)
 
     try:
         if force_recreate:
@@ -34,7 +36,7 @@ def create_collection(force_recreate=False):
         if client.collection_exists(COLLECTION_NAME):
             return
 
-        # quantization but with large instance type
+        # # quantization but with smaller instance type
         # client.create_collection(
         #     COLLECTION_NAME,
         #     quantization_config=models.ScalarQuantization(
@@ -43,28 +45,43 @@ def create_collection(force_recreate=False):
         #     vectors_config=models.VectorParams(
         #         size=VECTOR_SIZE,
         #         distance=models.Distance.COSINE,
-        #         on_disk=False,
-        #         datatype=models.Datatype.FLOAT32,
+        #         on_disk=True,  # !!!
+        #         datatype=models.Datatype.FLOAT32,  # !!!
         #     ),
         #     optimizers_config=models.OptimizersConfigDiff(indexing_threshold=0),
+        #     replication_factor=2,  # !!!
         # )
 
         # quantization but with smaller instance type
         client.create_collection(
             COLLECTION_NAME,
-            quantization_config=models.ScalarQuantization(
-                scalar=models.ScalarQuantizationConfig(type=models.ScalarType.INT8, always_ram=True, quantile=0.99),
-            ),
             vectors_config=models.VectorParams(
                 size=VECTOR_SIZE,
                 distance=models.Distance.COSINE,
-                on_disk=True,  # !!!
-                datatype=models.Datatype.FLOAT32,  # !!!
+                datatype=models.Datatype.FLOAT32,
             ),
             optimizers_config=models.OptimizersConfigDiff(indexing_threshold=0),
-            replication_factor=2,  # !!!
-        )
+            # Collection Params
+            shard_number=6,  # vs. n_nodes
+            on_disk_payload=False,  # vs. true
+            # HNSW Config
+            hnsw_config=models.HnswConfigDiff(
+                m=32,  # vs. 16
+                ef_construct=512,  # vs. 100
+                payload_m=32,  # vs. m
+                on_disk=False,  # = default
+            ),
+            strict_mode_config=models.StrictModeConfig(
+                enabled=False,
+            ),
 
+
+        )
+        client.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name="ontology_name",
+            field_schema=models.PayloadSchemaType.KEYWORD,
+        )
     finally:
         client.close()
 
@@ -84,6 +101,8 @@ def read_data(datasets: list[str], skip_first: int = 0, limit: int = LIMIT_POINT
                 return
 
             embedding = item.pop("emb")
+            
+            item["ontology_name"] = random.choice(["ncbitaxon", "uberon", "chebi", "go", "mondo"])
 
             yield models.PointStruct(id=global_idx, vector=embedding.tolist()[:VECTOR_SIZE], payload=item)
 

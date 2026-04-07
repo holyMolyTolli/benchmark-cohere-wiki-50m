@@ -1,8 +1,0 @@
-qdrant-client
-tqdm
-pandas
-huggingface_hub
-fsspec
-pyarrow
-aiohttp
-python-dotenv
